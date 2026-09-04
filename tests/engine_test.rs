@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::sync::{Arc, Condvar, Mutex as StdMutex};
 use std::time::Duration;
 
 use base64::Engine as _;
@@ -85,6 +85,50 @@ impl Respond for NotifyResponder {
     fn respond(&self, _request: &Request) -> ResponseTemplate {
         self.notify.notify_one();
         ResponseTemplate::new(self.status).set_delay(self.delay)
+    }
+}
+
+#[derive(Default)]
+struct ResponseGate {
+    requested: Notify,
+    released: StdMutex<bool>,
+    release: Condvar,
+}
+
+impl ResponseGate {
+    fn wait_until_released(&self) {
+        let released = self.released.lock().expect("response gate poisoned");
+        drop(
+            self.release
+                .wait_while(released, |released| !*released)
+                .expect("response gate poisoned"),
+        );
+    }
+
+    fn release(&self) {
+        *self.released.lock().expect("response gate poisoned") = true;
+        self.release.notify_all();
+    }
+}
+
+struct GatedResponder {
+    gate: Arc<ResponseGate>,
+    status: u16,
+}
+
+impl Respond for GatedResponder {
+    fn respond(&self, _request: &Request) -> ResponseTemplate {
+        self.gate.requested.notify_one();
+        self.gate.wait_until_released();
+        ResponseTemplate::new(self.status)
+    }
+}
+
+struct ReleaseOnDrop(Arc<ResponseGate>);
+
+impl Drop for ReleaseOnDrop {
+    fn drop(&mut self) {
+        self.0.release();
     }
 }
 
@@ -1022,63 +1066,59 @@ async fn quit_drops_blocked_non_terminal_events_after_cancellation() {
 }
 
 #[tokio::test]
-async fn fatal_cancellation_wins_over_saturated_non_terminal_events() {
-    let immich = MockServer::start().await;
-    let llm = MockServer::start().await;
-    let fatal_response = Arc::new(Notify::new());
-    mount_search_page(&immich, 1, 1, &[("a1", "IMG_1.HEIC", None)], Some(2)).await;
+async fn shutdown_conclusively_stops_old_handle_before_replacement_runs() {
+    let old_immich = MockServer::start().await;
+    let old_llm = MockServer::start().await;
+    let write_gate = Arc::new(ResponseGate::default());
+    let _release_on_drop = ReleaseOnDrop(write_gate.clone());
+    mount_immich_basics(&old_immich, &[("a1", "IMG_1.HEIC", None)]).await;
     Mock::given(method("POST"))
-        .and(path("/api/search/metadata"))
-        .and(body_json(json!({
-            "type": "IMAGE",
-            "withExif": true,
-            "size": 1,
-            "page": 2,
-            "order": "desc",
-        })))
-        .respond_with(NotifyResponder {
-            notify: fatal_response.clone(),
-            status: 401,
-            delay: Duration::ZERO,
+        .and(path("/v1/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(completion("old")))
+        .expect(1)
+        .mount(&old_llm)
+        .await;
+    Mock::given(method("PUT"))
+        .and(path("/api/assets/a1"))
+        .respond_with(GatedResponder {
+            gate: write_gate.clone(),
+            status: 200,
         })
         .expect(1)
-        .mount(&immich)
-        .await;
-    Mock::given(method("GET"))
-        .and(path("/api/assets/a1/thumbnail"))
-        .respond_with(ResponseTemplate::new(200).set_body_bytes(JPEG.to_vec()))
-        .expect(0)
-        .mount(&immich)
+        .mount(&old_immich)
         .await;
 
-    let (tx, mut rx) = mpsc::channel(1);
-    let handle = engine::spawn_with(config_with_run(&immich, &llm, 1, 3, 1), tx, fast()).unwrap();
-    handle.send(Command::Start).await;
-    fatal_response.notified().await;
-    // The responder notification fires while wiremock is constructing the response,
-    // before reqwest necessarily observes the 401 and cancels the run. Keep the event
-    // channel saturated long enough for that local response to cross the boundary.
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    let (old_tx, mut old_rx) = mpsc::channel(256);
+    let old = engine::spawn_with(config(&old_immich, &old_llm), old_tx, fast()).unwrap();
+    old.send(Command::Start).await;
+    tokio::time::timeout(Duration::from_secs(1), write_gate.requested.notified())
+        .await
+        .expect("old engine did not reach its gated write");
+    old.shutdown(Duration::from_millis(10)).await;
 
-    let first = next_event(&mut rx).await;
-    assert_eq!(
-        first,
-        Event::PageLoaded {
-            scanned: 1,
-            queued: 1
-        }
-    );
-
-    let fatal = next_event(&mut rx).await;
-    assert!(
-        matches!(fatal, Event::Fatal { ref error } if error.contains("401")),
-        "expected Fatal after cancellation won the race, got {fatal:?}"
-    );
-    assert_no_matching_event(&mut rx, Duration::from_millis(200), |event| {
-        !matches!(event, Event::Fatal { .. })
+    let new_immich = MockServer::start().await;
+    let new_llm = MockServer::start().await;
+    mount_immich_basics(&new_immich, &[]).await;
+    let (new_tx, mut new_rx) = mpsc::channel(256);
+    let new = engine::spawn_with(config(&new_immich, &new_llm), new_tx, fast()).unwrap();
+    new.send(Command::Start).await;
+    collect_until(&mut new_rx, |event| {
+        matches!(event, Event::RunFinished { .. })
     })
     .await;
-    handle.shutdown(Duration::from_secs(1)).await;
+
+    let old_closed = tokio::time::timeout(Duration::from_millis(100), async {
+        while old_rx.recv().await.is_some() {}
+    })
+    .await
+    .is_ok();
+    write_gate.release();
+    new.shutdown(Duration::from_secs(1)).await;
+
+    assert!(
+        old_closed,
+        "old engine tasks still held the event channel while replacement ran"
+    );
 }
 
 #[tokio::test]

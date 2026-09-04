@@ -1,13 +1,13 @@
 //! Entry point: CLI args, logging, terminal lifecycle, and the event loop.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use anyhow::Context;
 use clap::Parser;
 use immich_alt_text::app::{App, RunState};
-use immich_alt_text::config::{self, Config};
-use immich_alt_text::engine::{self, EngineHandle};
+use immich_alt_text::config::{self, Config, ConfigError};
+use immich_alt_text::engine::{self, EngineHandle, PreparedEngine};
 use immich_alt_text::events::{Action, Event, Key};
 use immich_alt_text::immich::ImmichClient;
 use immich_alt_text::llm::LlmClient;
@@ -35,16 +35,52 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     let _log_guard = init_logging()?;
     let path = cli.config.unwrap_or_else(config::default_path);
-    let cfg = config::load(&path)?.unwrap_or_default();
-    // A missing or broken file both land on the settings screen.
-    let needs_setup = cfg.validate().is_err();
-    tracing::info!(config = %path.display(), needs_setup, "starting");
+    let startup = load_startup_config(&path)?;
+    tracing::info!(config = %path.display(), needs_setup = startup.needs_setup, "starting");
 
     install_panic_hook();
     let terminal = ratatui::init();
-    let result = run(terminal, cfg, needs_setup, path).await;
+    let result = run(
+        terminal,
+        startup.config,
+        startup.needs_setup,
+        startup.message,
+        path,
+    )
+    .await;
     ratatui::restore();
     result
+}
+
+struct StartupConfig {
+    config: Config,
+    needs_setup: bool,
+    message: Option<String>,
+}
+
+fn load_startup_config(path: &Path) -> Result<StartupConfig, ConfigError> {
+    match config::load(path) {
+        Ok(config) => {
+            let config = config.unwrap_or_default();
+            let needs_setup = config.validate().is_err();
+            Ok(StartupConfig {
+                config,
+                needs_setup,
+                message: None,
+            })
+        }
+        Err(ConfigError::Parse { .. }) => {
+            tracing::warn!(config = %path.display(), "config parse failed");
+            Ok(StartupConfig {
+                config: Config::default(),
+                needs_setup: true,
+                message: Some(
+                    "config file could not be parsed; review the settings and save".into(),
+                ),
+            })
+        }
+        Err(error) => Err(error),
+    }
 }
 
 fn init_logging() -> anyhow::Result<tracing_appender::non_blocking::WorkerGuard> {
@@ -75,17 +111,17 @@ fn spawn_key_reader() -> mpsc::UnboundedReceiver<Key> {
     let (tx, rx) = mpsc::unbounded_channel();
     std::thread::spawn(move || loop {
         match event::poll(Duration::from_millis(100)) {
-            Ok(true) => {
-                if let Ok(TermEvent::Key(k)) = event::read() {
-                    if k.kind == KeyEventKind::Press {
-                        if let Some(key) = map_key(k.code, k.modifiers) {
-                            if tx.send(key).is_err() {
-                                return;
-                            }
+            Ok(true) => match event::read() {
+                Ok(TermEvent::Key(k)) if k.kind == KeyEventKind::Press => {
+                    if let Some(key) = map_key(k.code, k.modifiers) {
+                        if tx.send(key).is_err() {
+                            return;
                         }
                     }
                 }
-            }
+                Ok(_) => {}
+                Err(_) => return,
+            },
             Ok(false) => {
                 if tx.is_closed() {
                     return;
@@ -116,16 +152,30 @@ fn map_key(code: KeyCode, mods: KeyModifiers) -> Option<Key> {
     })
 }
 
+enum KeyRead {
+    Action(Option<Action>),
+    Closed,
+}
+
+fn handle_key_read(app: &mut App, key: Option<Key>) -> KeyRead {
+    match key {
+        Some(key) => KeyRead::Action(app.on_key(key)),
+        None => KeyRead::Closed,
+    }
+}
+
 async fn run(
     mut terminal: DefaultTerminal,
     cfg: Config,
     needs_setup: bool,
+    setup_message: Option<String>,
     path: PathBuf,
 ) -> anyhow::Result<()> {
     let (event_tx, mut event_rx) = mpsc::channel::<Event>(1024);
     let mut keys = spawn_key_reader();
     let mut theme = Theme::from_name(cfg.ui.theme);
     let mut app = App::new(cfg.clone(), needs_setup);
+    app.settings.message = setup_message;
     let mut engine: Option<EngineHandle> = if needs_setup {
         None
     } else {
@@ -133,53 +183,121 @@ async fn run(
     };
     let mut tick = tokio::time::interval(Duration::from_millis(250));
 
-    loop {
-        terminal.draw(|f| ui::render(f, &app, Instant::now(), &theme))?;
-        let action = tokio::select! {
-            Some(key) = keys.recv() => app.on_key(key),
-            Some(ev) = event_rx.recv() => {
-                app.on_event(ev);
-                None
-            }
-            _ = tick.tick() => None,
-        };
-        match action {
-            None => {}
-            Some(Action::Send(cmd)) => match &engine {
-                Some(e) => e.send(cmd).await,
-                None => {
-                    app.run_state = RunState::Idle;
-                    app.footer_message =
-                        Some("open settings with c and save a config first".into());
+    let result = async {
+        loop {
+            terminal.draw(|f| ui::render(f, &app, Instant::now(), &theme))?;
+            let key_read = tokio::select! {
+                key = keys.recv() => handle_key_read(&mut app, key),
+                Some(ev) = event_rx.recv() => {
+                    app.on_event(ev);
+                    KeyRead::Action(None)
                 }
-            },
-            Some(Action::TestConnections(candidate)) => {
-                tokio::spawn(test_connections(candidate, event_tx.clone()));
-            }
-            Some(Action::SaveConfig(new_cfg)) => {
-                if let Err(e) = config::save(&path, &new_cfg) {
-                    tracing::error!(error = %e, "save failed");
-                    app.footer_message = Some(format!("save failed: {e}"));
-                    continue;
+                _ = tick.tick() => KeyRead::Action(None),
+            };
+            let action = match key_read {
+                KeyRead::Action(action) => action,
+                KeyRead::Closed => break,
+            };
+            match action {
+                None => {}
+                Some(Action::Send(cmd)) => match &engine {
+                    Some(e) => e.send(cmd).await,
+                    None => {
+                        app.run_state = RunState::Idle;
+                        app.footer_message =
+                            Some("open settings with c and save a config first".into());
+                    }
+                },
+                Some(Action::TestConnections(candidate)) => {
+                    tokio::spawn(test_connections(candidate, event_tx.clone()));
                 }
-                tracing::info!(config = %path.display(), "saved");
-                if let Some(old) = engine.take() {
-                    old.shutdown(SHUTDOWN_GRACE).await;
+                Some(Action::SaveConfig(new_cfg)) => {
+                    apply_saved_config(
+                        &mut app,
+                        &mut engine,
+                        &mut theme,
+                        &path,
+                        new_cfg,
+                        &event_tx,
+                    )
+                    .await;
                 }
-                theme = Theme::from_name(new_cfg.ui.theme);
-                engine = Some(engine::spawn(new_cfg, event_tx.clone())?);
+                Some(Action::Quit) => break,
             }
-            Some(Action::Quit) => break,
+            if app.should_quit {
+                break;
+            }
         }
-        if app.should_quit {
-            break;
+        Ok(())
+    }
+    .await;
+
+    shutdown_engine_before_return(result, &mut engine).await
+}
+
+async fn apply_saved_config(
+    app: &mut App,
+    active: &mut Option<EngineHandle>,
+    theme: &mut Theme,
+    path: &Path,
+    candidate: Config,
+    events: &mpsc::Sender<Event>,
+) {
+    apply_saved_config_with(
+        app,
+        active,
+        theme,
+        path,
+        candidate,
+        events,
+        |config, events| engine::prepare(config, events).map_err(|_| ()),
+    )
+    .await;
+}
+
+async fn apply_saved_config_with<F>(
+    app: &mut App,
+    active: &mut Option<EngineHandle>,
+    theme: &mut Theme,
+    path: &Path,
+    candidate: Config,
+    events: &mpsc::Sender<Event>,
+    prepare: F,
+) where
+    F: FnOnce(Config, mpsc::Sender<Event>) -> Result<PreparedEngine, ()>,
+{
+    let replacement = match prepare(candidate.clone(), events.clone()) {
+        Ok(replacement) => replacement,
+        Err(_) => {
+            tracing::error!("engine preparation failed");
+            app.config_save_failed("could not apply settings");
+            return;
         }
+    };
+
+    if config::save(path, &candidate).is_err() {
+        tracing::error!(config = %path.display(), "config save failed");
+        app.config_save_failed("could not save settings");
+        return;
     }
 
-    if let Some(e) = engine {
-        e.shutdown(SHUTDOWN_GRACE).await;
+    tracing::info!(config = %path.display(), "saved");
+    if let Some(old) = active.take() {
+        old.shutdown(SHUTDOWN_GRACE).await;
     }
-    Ok(())
+    *active = Some(replacement.start());
+    *theme = Theme::from_name(candidate.ui.theme);
+    app.config_save_succeeded(candidate);
+}
+
+async fn shutdown_engine_before_return(
+    result: anyhow::Result<()>,
+    active: &mut Option<EngineHandle>,
+) -> anyhow::Result<()> {
+    if let Some(engine) = active.take() {
+        engine.shutdown(SHUTDOWN_GRACE).await;
+    }
+    result
 }
 
 /// Checks both servers with the candidate config and reports back as an `Event`.
@@ -220,10 +338,44 @@ async fn test_connections(cfg: Config, tx: mpsc::Sender<Event>) {
 
 #[cfg(test)]
 mod tests {
-    use immich_alt_text::events::Key;
+    use immich_alt_text::app::{App, RunState, Screen};
+    use immich_alt_text::config::{
+        Config, ImmichConfig, LlmConfig, RunConfig, ThemeName, UiConfig,
+    };
+    use immich_alt_text::engine;
+    use immich_alt_text::events::{Action, Event, Key};
+    use immich_alt_text::theme::Theme;
     use ratatui::crossterm::event::{KeyCode, KeyModifiers};
+    use tokio::sync::mpsc;
 
-    use super::map_key;
+    use super::{
+        apply_saved_config, apply_saved_config_with, handle_key_read, load_startup_config, map_key,
+        shutdown_engine_before_return, KeyRead,
+    };
+
+    fn config() -> Config {
+        Config {
+            immich: ImmichConfig {
+                url: "http://127.0.0.1:3001".into(),
+                api_key: "immich-secret".into(),
+                timeout_secs: 5,
+            },
+            llm: LlmConfig {
+                base_url: "http://127.0.0.1:3002/v1".into(),
+                api_key: "llm-secret".into(),
+                model: "vision".into(),
+                max_tokens: 100,
+                timeout_secs: 5,
+                prompt: "describe".into(),
+            },
+            run: RunConfig {
+                workers: 1,
+                retries: 1,
+                page_size: 10,
+            },
+            ui: UiConfig::default(),
+        }
+    }
 
     #[test]
     fn maps_plain_terminal_keys_to_app_keys() {
@@ -264,5 +416,139 @@ mod tests {
     fn ignores_unhandled_keys() {
         assert_eq!(map_key(KeyCode::Char('x'), KeyModifiers::CONTROL), None);
         assert_eq!(map_key(KeyCode::F(1), KeyModifiers::NONE), None);
+    }
+
+    #[test]
+    fn closed_key_channel_stops_the_loop() {
+        let mut app = App::new(config(), false);
+
+        assert!(matches!(handle_key_read(&mut app, None), KeyRead::Closed));
+        assert!(matches!(
+            handle_key_read(&mut app, Some(Key::Char('s'))),
+            KeyRead::Action(Some(Action::Send(_)))
+        ));
+    }
+
+    #[test]
+    fn malformed_toml_enters_settings_without_exposing_file_contents() {
+        let dir = tempfile::tempdir().expect("temporary directory");
+        let path = dir.path().join("config.toml");
+        let secret = "should-never-appear-in-the-ui";
+        std::fs::write(&path, format!("immich = [\"{secret}\"")).expect("write malformed config");
+
+        let startup = load_startup_config(&path).expect("parse failure should be recoverable");
+
+        assert!(startup.needs_setup);
+        assert_eq!(startup.config, Config::default());
+        let message = startup
+            .message
+            .expect("settings should explain the problem");
+        assert!(message.contains("could not be parsed"));
+        assert!(!message.contains(secret));
+    }
+
+    #[tokio::test]
+    async fn replacement_failure_keeps_old_config_runtime_candidate_and_engine() {
+        let dir = tempfile::tempdir().expect("temporary directory");
+        let path = dir.path().join("config.toml");
+        let committed = config();
+        let mut candidate = committed.clone();
+        candidate.run.workers = 3;
+        candidate.ui.theme = ThemeName::Mono;
+        let (tx, _rx) = mpsc::channel::<Event>(8);
+        let old_engine = engine::spawn(committed.clone(), tx.clone()).expect("valid old engine");
+        let mut active = Some(old_engine);
+        let mut app = App::new(committed.clone(), false);
+        app.run_state = RunState::Paused;
+        app.scanned = 9;
+        app.on_key(Key::Char('c'));
+        app.settings.fields[immich_alt_text::settings::WORKERS].value = "3".into();
+        let mut theme = Theme::from_name(committed.ui.theme);
+
+        apply_saved_config_with(
+            &mut app,
+            &mut active,
+            &mut theme,
+            &path,
+            candidate,
+            &tx,
+            |_config, _events| Err(()),
+        )
+        .await;
+
+        assert_eq!(app.config, committed);
+        assert_eq!(app.run_state, RunState::Paused);
+        assert_eq!(app.scanned, 9);
+        assert_eq!(app.screen, Screen::Settings);
+        assert_eq!(theme.border, Theme::btop().border);
+        assert!(active.is_some());
+        assert!(!path.exists());
+        assert!(app
+            .settings
+            .message
+            .as_deref()
+            .is_some_and(|message| message.contains("apply")));
+        shutdown_engine_before_return(Ok(()), &mut active)
+            .await
+            .expect("cleanup succeeds");
+    }
+
+    #[tokio::test]
+    async fn persistence_failure_keeps_old_config_runtime_candidate_and_engine() {
+        let dir = tempfile::tempdir().expect("temporary directory");
+        let committed = config();
+        let mut candidate = committed.clone();
+        candidate.run.workers = 3;
+        candidate.ui.theme = ThemeName::Mono;
+        let (tx, _rx) = mpsc::channel::<Event>(8);
+        let old_engine = engine::spawn(committed.clone(), tx.clone()).expect("valid old engine");
+        let mut active = Some(old_engine);
+        let mut app = App::new(committed.clone(), false);
+        app.run_state = RunState::Paused;
+        app.done = 4;
+        app.on_key(Key::Char('c'));
+        app.settings.fields[immich_alt_text::settings::WORKERS].value = "3".into();
+        let mut theme = Theme::from_name(committed.ui.theme);
+
+        apply_saved_config(
+            &mut app,
+            &mut active,
+            &mut theme,
+            dir.path(),
+            candidate,
+            &tx,
+        )
+        .await;
+
+        assert_eq!(app.config, committed);
+        assert_eq!(app.run_state, RunState::Paused);
+        assert_eq!(app.screen, Screen::Settings);
+        assert_eq!(theme.border, Theme::btop().border);
+        assert_eq!(app.done, 4);
+        assert!(active.is_some());
+        assert_eq!(
+            app.settings.fields[immich_alt_text::settings::WORKERS].value,
+            "3"
+        );
+        assert!(app
+            .settings
+            .message
+            .as_deref()
+            .is_some_and(|message| message.contains("save")));
+        shutdown_engine_before_return(Ok(()), &mut active)
+            .await
+            .expect("cleanup succeeds");
+    }
+
+    #[tokio::test]
+    async fn loop_error_still_shuts_down_the_active_engine() {
+        let (tx, mut rx) = mpsc::channel::<Event>(8);
+        let mut active = Some(engine::spawn(config(), tx).expect("valid engine"));
+        let result =
+            shutdown_engine_before_return(Err(anyhow::anyhow!("draw failed")), &mut active).await;
+
+        assert!(result.is_err());
+        assert!(active.is_none());
+        assert_eq!(rx.recv().await, None);
     }
 }

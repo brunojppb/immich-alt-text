@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use tokio::sync::{mpsc, oneshot, watch, Mutex};
-use tokio::task::JoinHandle;
+use tokio::task::{JoinHandle, JoinSet};
 use tokio_util::sync::CancellationToken;
 
 use crate::config::Config;
@@ -32,6 +32,8 @@ impl Default for EngineOptions {
 #[derive(Debug, thiserror::Error)]
 pub enum EngineError {
     #[error(transparent)]
+    Config(#[from] crate::config::ConfigError),
+    #[error(transparent)]
     Immich(#[from] ImmichError),
     #[error(transparent)]
     Llm(#[from] LlmError),
@@ -41,6 +43,7 @@ pub enum EngineError {
 pub struct EngineHandle {
     cmd_tx: mpsc::Sender<ControlMessage>,
     cancel: CancellationToken,
+    force: CancellationToken,
     task: JoinHandle<()>,
 }
 
@@ -58,16 +61,45 @@ impl EngineHandle {
         }
     }
 
-    /// Cancels the engine and waits up to `grace` for it to stop.
-    pub async fn shutdown(self, grace: Duration) {
+    /// Cancels the engine, escalating after `grace`, and waits until every task stops.
+    pub async fn shutdown(mut self, grace: Duration) {
         self.cancel.cancel();
-        let _ = tokio::time::timeout(grace, self.task).await;
+        if tokio::time::timeout(grace, &mut self.task).await.is_err() {
+            self.force.cancel();
+            let _ = self.task.await;
+        }
+    }
+}
+
+/// A fully validated engine that owns no running tasks until `start` is called.
+pub struct PreparedEngine {
+    engine: Arc<Engine>,
+}
+
+impl PreparedEngine {
+    /// Starts the control task. It still waits for `Command::Start` before processing assets.
+    pub fn start(self) -> EngineHandle {
+        let (cmd_tx, cmd_rx) = mpsc::channel(16);
+        let cancel = self.engine.cancel.clone();
+        let force = self.engine.force.clone();
+        let task = tokio::spawn(self.engine.control_loop(cmd_rx));
+        EngineHandle {
+            cmd_tx,
+            cancel,
+            force,
+            task,
+        }
     }
 }
 
 /// Starts the engine with production options.
 pub fn spawn(config: Config, events: mpsc::Sender<Event>) -> Result<EngineHandle, EngineError> {
-    spawn_with(config, events, EngineOptions::default())
+    Ok(prepare(config, events)?.start())
+}
+
+/// Validates and constructs an inert engine with production options.
+pub fn prepare(config: Config, events: mpsc::Sender<Event>) -> Result<PreparedEngine, EngineError> {
+    prepare_with(config, events, EngineOptions::default())
 }
 
 /// Starts the engine. It waits for `Command::Start` before doing any work.
@@ -76,6 +108,16 @@ pub fn spawn_with(
     events: mpsc::Sender<Event>,
     options: EngineOptions,
 ) -> Result<EngineHandle, EngineError> {
+    Ok(prepare_with(config, events, options)?.start())
+}
+
+/// Validates and constructs an inert engine with caller-supplied options.
+pub fn prepare_with(
+    config: Config,
+    events: mpsc::Sender<Event>,
+    options: EngineOptions,
+) -> Result<PreparedEngine, EngineError> {
+    config.validate()?;
     let immich = ImmichClient::new(
         &config.immich.url,
         &config.immich.api_key,
@@ -88,8 +130,8 @@ pub fn spawn_with(
         config.llm.max_tokens,
         Duration::from_secs(config.llm.timeout_secs),
     )?;
-    let (cmd_tx, cmd_rx) = mpsc::channel(16);
     let cancel = CancellationToken::new();
+    let force = CancellationToken::new();
     let handoff = Arc::new(Mutex::new(()));
     let engine = Arc::new(Engine {
         immich,
@@ -97,15 +139,11 @@ pub fn spawn_with(
         config,
         options,
         events,
-        cancel: cancel.clone(),
+        cancel,
+        force,
         handoff: handoff.clone(),
     });
-    let task = tokio::spawn(engine.control_loop(cmd_rx));
-    Ok(EngineHandle {
-        cmd_tx,
-        cancel,
-        task,
-    })
+    Ok(PreparedEngine { engine })
 }
 
 struct Engine {
@@ -115,6 +153,7 @@ struct Engine {
     options: EngineOptions,
     events: mpsc::Sender<Event>,
     cancel: CancellationToken,
+    force: CancellationToken,
     handoff: Arc<Mutex<()>>,
 }
 
@@ -287,24 +326,43 @@ impl Engine {
         let done = Arc::new(AtomicU64::new(0));
         let failed = Arc::new(AtomicU64::new(0));
 
-        let mut handles = Vec::with_capacity(workers);
+        let mut handles = JoinSet::new();
         for _ in 0..workers {
-            handles.push(tokio::spawn(self.clone().worker(
+            handles.spawn(self.clone().worker(
                 token.clone(),
                 terminal_cancel.clone(),
                 pause_rx.clone(),
                 asset_rx.clone(),
                 done.clone(),
                 failed.clone(),
-            )));
+            ));
         }
 
-        self.clone()
-            .discover(token.clone(), terminal_cancel, asset_tx)
-            .await;
+        let discovery = self
+            .clone()
+            .discover(token.clone(), terminal_cancel, asset_tx);
+        tokio::pin!(discovery);
+        tokio::select! {
+            biased;
+            _ = self.force.cancelled() => {
+                handles.abort_all();
+                while handles.join_next().await.is_some() {}
+                active.store(false, Ordering::Release);
+                return;
+            }
+            _ = &mut discovery => {}
+        }
 
-        for handle in handles {
-            let _ = handle.await;
+        while !handles.is_empty() {
+            tokio::select! {
+                biased;
+                _ = self.force.cancelled() => {
+                    handles.abort_all();
+                    while handles.join_next().await.is_some() {}
+                    break;
+                }
+                _ = handles.join_next() => {}
+            }
         }
 
         active.store(false, Ordering::Release);
@@ -692,5 +750,79 @@ impl Engine {
             _ = token.cancelled() => false,
             result = self.events.send(event) => result.is_ok(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use tokio::sync::{mpsc, Barrier};
+    use tokio_util::sync::CancellationToken;
+
+    use super::prepare;
+    use crate::config::{Config, ImmichConfig, LlmConfig, RunConfig, UiConfig};
+    use crate::events::Event;
+
+    fn config() -> Config {
+        Config {
+            immich: ImmichConfig {
+                url: "http://127.0.0.1:3001".into(),
+                api_key: "key".into(),
+                timeout_secs: 5,
+            },
+            llm: LlmConfig {
+                base_url: "http://127.0.0.1:3002/v1".into(),
+                api_key: String::new(),
+                model: "vision".into(),
+                max_tokens: 100,
+                timeout_secs: 5,
+                prompt: "describe".into(),
+            },
+            run: RunConfig {
+                workers: 1,
+                retries: 0,
+                page_size: 10,
+            },
+            ui: UiConfig::default(),
+        }
+    }
+
+    #[tokio::test]
+    async fn cancellation_drops_a_non_terminal_event_blocked_on_a_full_channel() {
+        let (events, mut rx) = mpsc::channel(1);
+        events
+            .send(Event::PageLoaded {
+                scanned: 1,
+                queued: 1,
+            })
+            .await
+            .expect("event receiver is open");
+        let engine = prepare(config(), events).expect("valid engine").engine;
+        let token = CancellationToken::new();
+        let gate = Arc::new(Barrier::new(2));
+        let blocked_send = tokio::spawn({
+            let engine = engine.clone();
+            let token = token.clone();
+            let gate = gate.clone();
+            async move {
+                gate.wait().await;
+                engine
+                    .emit_run(&token, Event::DiscoveryDone { total_queued: 1 })
+                    .await
+            }
+        });
+
+        gate.wait().await;
+        token.cancel();
+        assert_eq!(
+            rx.recv().await,
+            Some(Event::PageLoaded {
+                scanned: 1,
+                queued: 1
+            })
+        );
+        assert!(!blocked_send.await.expect("send task did not panic"));
+        assert!(rx.try_recv().is_err());
     }
 }

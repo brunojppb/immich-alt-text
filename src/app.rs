@@ -188,6 +188,20 @@ impl App {
         }
     }
 
+    /// Commits a candidate after persistence and engine replacement both succeed.
+    pub fn config_save_succeeded(&mut self, config: Config) {
+        self.config = config;
+        self.settings = SettingsForm::from_config(&self.config);
+        self.reset_to_idle();
+        self.screen = Screen::Run;
+        self.footer_message = Some("settings saved".into());
+    }
+
+    /// Keeps the candidate form and current runtime state after a save failure.
+    pub fn config_save_failed(&mut self, message: impl Into<String>) {
+        self.settings.message = Some(message.into());
+    }
+
     /// Share of the queue finished so far, 0.0 to 1.0.
     pub fn progress_ratio(&self) -> f64 {
         if self.queued == 0 {
@@ -357,13 +371,7 @@ impl App {
         }
 
         match self.settings.to_config(&self.config) {
-            Ok(config) => {
-                self.config = config.clone();
-                self.reset_to_idle();
-                self.screen = Screen::Run;
-                self.footer_message = Some("settings saved".into());
-                Some(Action::SaveConfig(config))
-            }
+            Ok(config) => Some(Action::SaveConfig(config)),
             Err(message) => {
                 self.settings.message = Some(message);
                 None
@@ -660,18 +668,18 @@ mod tests {
     }
 
     #[test]
-    fn save_returns_config_and_goes_back() {
+    fn save_returns_candidate_without_committing_it() {
         let mut a = app();
         a.on_key(Key::Char('c'));
         a.settings.fields[crate::settings::WORKERS].value = "3".into();
         let action = a.on_key(Key::CtrlS);
-        match action {
+        match &action {
             Some(Action::SaveConfig(cfg)) => assert_eq!(cfg.run.workers, 3),
             other => panic!("{other:?}"),
         }
-        assert_eq!(a.screen, Screen::Run);
-        assert_eq!(a.config.run.workers, 3);
-        assert_eq!(a.footer_message.as_deref(), Some("settings saved"));
+        assert_eq!(a.screen, Screen::Settings);
+        assert_eq!(a.config.run.workers, 1);
+        assert_eq!(a.footer_message, None);
     }
 
     #[test]
@@ -703,11 +711,33 @@ mod tests {
         a.on_key(Key::Char('c'));
         a.settings.fields[crate::settings::WORKERS].value = "3".into();
         let action = a.on_key(Key::CtrlS);
-        match action {
+        match &action {
             Some(Action::SaveConfig(cfg)) => assert_eq!(cfg.run.workers, 3),
             other => panic!("{other:?}"),
         }
 
+        assert_eq!(a.run_state, RunState::Paused);
+        assert_eq!(a.screen, Screen::Settings);
+        assert_eq!((a.scanned, a.queued, a.done, a.failed), (12, 7, 1, 1));
+        assert_eq!(a.in_flight.len(), 1);
+        assert_eq!(a.log.len(), 2);
+        assert_eq!(a.recent.len(), 1);
+        assert_eq!(a.llm_time_total, Duration::from_secs(3));
+        assert_eq!(a.asset_time_total, Duration::from_secs(4));
+        assert!(a.run_started.is_some());
+        assert_eq!(a.run_elapsed, None);
+        assert_eq!(a.progress_ratio(), 2.0 / 7.0);
+        assert_eq!(a.avg_llm(), Some(Duration::from_secs(3)));
+        assert_eq!(a.avg_total(), Some(Duration::from_secs(4)));
+        assert_eq!(a.rate_per_min(Instant::now()), None);
+
+        let candidate = match action {
+            Some(Action::SaveConfig(cfg)) => cfg,
+            other => panic!("{other:?}"),
+        };
+        a.config_save_succeeded(candidate);
+
+        assert_eq!(a.config.run.workers, 3);
         assert_eq!(a.run_state, RunState::Idle);
         assert_eq!(a.screen, Screen::Run);
         assert_eq!((a.scanned, a.queued, a.done, a.failed), (0, 0, 0, 0));
@@ -718,11 +748,35 @@ mod tests {
         assert_eq!(a.asset_time_total, Duration::ZERO);
         assert_eq!(a.run_started, None);
         assert_eq!(a.run_elapsed, None);
-        assert_eq!(a.progress_ratio(), 0.0);
-        assert_eq!(a.avg_llm(), None);
-        assert_eq!(a.avg_total(), None);
-        assert_eq!(a.rate_per_min(Instant::now()), None);
-        assert_eq!(a.eta(Instant::now()), None);
+        assert_eq!(a.footer_message.as_deref(), Some("settings saved"));
+    }
+
+    #[test]
+    fn failed_config_save_keeps_candidate_and_runtime_state() {
+        let mut a = app();
+        a.on_key(Key::Char('s'));
+        a.on_event(Event::PageLoaded {
+            scanned: 12,
+            queued: 7,
+        });
+        assert_eq!(a.on_key(Key::Char('p')), Some(Action::Send(Command::Pause)));
+        let committed = a.config.clone();
+
+        a.on_key(Key::Char('c'));
+        a.settings.fields[crate::settings::WORKERS].value = "3".into();
+        assert!(matches!(a.on_key(Key::CtrlS), Some(Action::SaveConfig(_))));
+        a.config_save_failed("save failed");
+
+        assert_eq!(a.config, committed);
+        assert_eq!(a.run_state, RunState::Paused);
+        assert_eq!(a.screen, Screen::Settings);
+        assert_eq!((a.scanned, a.queued), (12, 7));
+        assert_eq!(
+            a.settings.fields[crate::settings::WORKERS].value,
+            "3",
+            "candidate edits remain available for correction or retry"
+        );
+        assert_eq!(a.settings.message.as_deref(), Some("save failed"));
     }
 
     #[test]
