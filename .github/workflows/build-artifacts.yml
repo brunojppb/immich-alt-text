@@ -31,7 +31,7 @@ jobs:
         run: cargo +1.88.0 test --locked
 
       - name: Check formatting
-        run: cargo +1.88.0 fmt --locked -- --check
+        run: cargo +1.88.0 fmt -- --check
 
       - name: Run Clippy
         run: cargo +1.88.0 clippy --locked --all-targets -- -D warnings
@@ -124,7 +124,7 @@ jobs:
       - name: Download target artifacts
         uses: actions/download-artifact@v4
         with:
-          pattern: immich-alt-text-*
+          pattern: 'immich-alt-text-{x86_64-unknown-linux-musl,aarch64-unknown-linux-musl,aarch64-apple-darwin}'
           merge-multiple: true
           path: artifacts
 
