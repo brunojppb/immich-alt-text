@@ -1,0 +1,37 @@
+name: Build artifacts
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-artifacts-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: Verify Rust crate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Install Rust 1.88
+        shell: bash
+        run: |
+          rustup toolchain install 1.88.0 --profile minimal --no-self-update
+          rustup component add rustfmt clippy --toolchain 1.88.0
+
+      - name: Run tests
+        run: cargo +1.88.0 test --locked
+
+      - name: Check formatting
+        run: cargo +1.88.0 fmt --locked -- --check
+
+      - name: Run Clippy
+        run: cargo +1.88.0 clippy --locked --all-targets -- -D warnings
