@@ -115,3 +115,32 @@ jobs:
           if-no-files-found: error
           retention-days: 14
           compression-level: 0
+
+  aggregate:
+    name: Aggregate build artifacts
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download target artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: immich-alt-text-*
+          merge-multiple: true
+          path: artifacts
+
+      - name: Verify aggregate contents
+        shell: bash
+        run: |
+          test "$(find artifacts -maxdepth 1 -type f -name '*.tar.gz' | wc -l)" -eq 3
+          for archive in artifacts/*.tar.gz; do
+            tar -tzf "$archive"
+          done
+
+      - name: Upload aggregate artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: immich-alt-text-builds
+          path: artifacts/*.tar.gz
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
