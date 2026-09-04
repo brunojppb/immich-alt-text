@@ -41,12 +41,25 @@ pub enum EngineError {
 pub struct EngineHandle {
     cmd_tx: mpsc::Sender<Command>,
     cancel: CancellationToken,
+    handoff: Arc<Mutex<()>>,
+    pause_tx: watch::Sender<bool>,
     task: JoinHandle<()>,
 }
 
 impl EngineHandle {
     /// Sends a command. Dropped silently if the engine is gone.
     pub async fn send(&self, cmd: Command) {
+        match cmd {
+            Command::Pause => {
+                let _ = self.pause_tx.send(true);
+                let guard = self.handoff.lock().await;
+                drop(guard);
+            }
+            Command::Resume => {
+                let _ = self.pause_tx.send(false);
+            }
+            Command::Start | Command::Quit => {}
+        }
         let _ = self.cmd_tx.send(cmd).await;
     }
 
@@ -82,6 +95,8 @@ pub fn spawn_with(
     )?;
     let (cmd_tx, cmd_rx) = mpsc::channel(16);
     let cancel = CancellationToken::new();
+    let handoff = Arc::new(Mutex::new(()));
+    let (pause_tx, _) = watch::channel(false);
     let engine = Arc::new(Engine {
         immich,
         llm,
@@ -89,11 +104,15 @@ pub fn spawn_with(
         options,
         events,
         cancel: cancel.clone(),
+        handoff: handoff.clone(),
+        pause_tx: pause_tx.clone(),
     });
     let task = tokio::spawn(engine.control_loop(cmd_rx));
     Ok(EngineHandle {
         cmd_tx,
         cancel,
+        handoff,
+        pause_tx,
         task,
     })
 }
@@ -105,11 +124,12 @@ struct Engine {
     options: EngineOptions,
     events: mpsc::Sender<Event>,
     cancel: CancellationToken,
+    handoff: Arc<Mutex<()>>,
+    pause_tx: watch::Sender<bool>,
 }
 
 /// One run: discovery plus workers. Dropped when the next run starts.
 struct Run {
-    pause_tx: watch::Sender<bool>,
     token: CancellationToken,
     /// Cleared just before `RunFinished` so a new `Start` is accepted at once.
     active: Arc<AtomicBool>,
@@ -130,6 +150,8 @@ enum StageError {
     Permanent(String),
     #[error("{0}")]
     Fatal(String),
+    #[error("cancelled")]
+    Cancelled,
 }
 
 impl From<ImmichError> for StageError {
@@ -176,14 +198,10 @@ impl Engine {
                             }
                         }
                         Command::Pause => {
-                            if let Some(run) = &run {
-                                let _ = run.pause_tx.send(true);
-                            }
+                            let _ = self.pause_tx.send(true);
                         }
                         Command::Resume => {
-                            if let Some(run) = &run {
-                                let _ = run.pause_tx.send(false);
-                            }
+                            let _ = self.pause_tx.send(false);
                         }
                         Command::Quit => {
                             self.cancel.cancel();
@@ -201,11 +219,10 @@ impl Engine {
 
     fn start_run(self: Arc<Self>) -> Run {
         let token = self.cancel.child_token();
-        let (pause_tx, pause_rx) = watch::channel(false);
+        let pause_rx = self.pause_tx.subscribe();
         let active = Arc::new(AtomicBool::new(true));
         let task = tokio::spawn(self.run(token.clone(), pause_rx, active.clone()));
         Run {
-            pause_tx,
             token,
             active,
             task,
@@ -261,10 +278,11 @@ impl Engine {
         let mut queued = 0u64;
 
         loop {
-            let result = tokio::select! {
-                _ = token.cancelled() => return,
-                result = self.retry(|| self.immich.list_images(page, self.config.run.page_size)) => result,
-            };
+            let result = self
+                .retry(&token, true, || {
+                    self.immich.list_images(page, self.config.run.page_size)
+                })
+                .await;
             let page_data = match result {
                 Ok(page_data) => page_data,
                 Err(error) => {
@@ -313,28 +331,48 @@ impl Engine {
         done: Arc<AtomicU64>,
         failed: Arc<AtomicU64>,
     ) {
+        let mut pending = None;
+
         loop {
-            while *pause_rx.borrow() {
-                tokio::select! {
-                    _ = token.cancelled() => return,
-                    result = pause_rx.changed() => {
-                        if result.is_err() {
-                            return;
-                        }
-                    }
-                }
+            if self
+                .wait_until_resumed(&token, &mut pause_rx)
+                .await
+                .is_err()
+            {
+                return;
             }
 
-            let asset = {
-                let mut rx = asset_rx.lock().await;
-                tokio::select! {
-                    _ = token.cancelled() => return,
-                    asset = rx.recv() => match asset {
-                        Some(asset) => asset,
-                        None => return,
-                    },
+            let asset = match pending.take() {
+                Some(asset) => asset,
+                None => {
+                    let mut rx = asset_rx.lock().await;
+                    tokio::select! {
+                        _ = token.cancelled() => return,
+                        asset = rx.recv() => match asset {
+                            Some(asset) => asset,
+                            None => return,
+                        },
+                    }
                 }
             };
+
+            {
+                let handoff_guard = self.handoff.lock().await;
+                if token.is_cancelled() {
+                    drop(handoff_guard);
+                    return;
+                }
+                if *pause_rx.borrow() {
+                    pending = Some(asset);
+                    continue;
+                }
+                self.emit(Event::AssetStarted {
+                    id: asset.id.clone(),
+                    name: asset.name.clone(),
+                })
+                .await;
+                drop(handoff_guard);
+            }
 
             match self.process(&token, &asset).await {
                 Outcome::Done => {
@@ -349,20 +387,18 @@ impl Engine {
     }
 
     async fn process(&self, token: &CancellationToken, asset: &Asset) -> Outcome {
+        if token.is_cancelled() {
+            return Outcome::Cancelled;
+        }
+
         let started = Instant::now();
         let id = asset.id.clone();
         let name = asset.name.clone();
-        self.emit(Event::AssetStarted {
-            id: id.clone(),
-            name: name.clone(),
-        })
-        .await;
 
         self.stage(&id, Stage::Fetching).await;
-        let jpeg = tokio::select! {
-            _ = token.cancelled() => return Outcome::Cancelled,
-            result = self.retry(|| self.immich.preview_jpeg(&id)) => result,
-        };
+        let jpeg = self
+            .retry(token, true, || self.immich.preview_jpeg(&id))
+            .await;
         let jpeg = match jpeg {
             Ok(jpeg) => jpeg,
             Err(error) => return self.fail_asset(token, id, name, error).await,
@@ -370,10 +406,11 @@ impl Engine {
 
         self.stage(&id, Stage::CallingLlm).await;
         let llm_started = Instant::now();
-        let text = tokio::select! {
-            _ = token.cancelled() => return Outcome::Cancelled,
-            result = self.retry(|| self.llm.describe(&jpeg, &self.config.llm.prompt)) => result,
-        };
+        let text = self
+            .retry(token, true, || {
+                self.llm.describe(&jpeg, &self.config.llm.prompt)
+            })
+            .await;
         let text = match text {
             Ok(text) => text,
             Err(error) => return self.fail_asset(token, id, name, error).await,
@@ -381,8 +418,15 @@ impl Engine {
         let llm_took = llm_started.elapsed();
 
         self.stage(&id, Stage::Writing).await;
-        if let Err(error) = self.retry(|| self.immich.set_description(&id, &text)).await {
+        if let Err(error) = self
+            .retry(token, false, || self.immich.set_description(&id, &text))
+            .await
+        {
             return self.fail_asset(token, id, name, error).await;
+        }
+
+        if token.is_cancelled() {
+            return Outcome::Cancelled;
         }
 
         self.emit(Event::AssetDone {
@@ -396,7 +440,12 @@ impl Engine {
         Outcome::Done
     }
 
-    async fn retry<T, E, F, Fut>(&self, mut op: F) -> Result<T, StageError>
+    async fn retry<T, E, F, Fut>(
+        &self,
+        token: &CancellationToken,
+        cancel_in_flight: bool,
+        mut op: F,
+    ) -> Result<T, StageError>
     where
         F: FnMut() -> Fut,
         Fut: Future<Output = Result<T, E>>,
@@ -406,7 +455,20 @@ impl Engine {
         let mut attempt = 1u32;
 
         loop {
-            match op().await.map_err(Into::into) {
+            if token.is_cancelled() {
+                return Err(StageError::Cancelled);
+            }
+
+            let result = if cancel_in_flight {
+                tokio::select! {
+                    _ = token.cancelled() => return Err(StageError::Cancelled),
+                    result = op() => result.map_err(Into::into),
+                }
+            } else {
+                op().await.map_err(Into::into)
+            };
+
+            match result {
                 Ok(value) => return Ok(value),
                 Err(StageError::Transient(message)) if attempt < attempts => {
                     let delay = self.options.backoff_base * 2u32.pow(attempt - 1);
@@ -416,7 +478,10 @@ impl Engine {
                         %message,
                         "retrying"
                     );
-                    tokio::time::sleep(delay).await;
+                    tokio::select! {
+                        _ = token.cancelled() => return Err(StageError::Cancelled),
+                        _ = tokio::time::sleep(delay) => {}
+                    }
                     attempt += 1;
                 }
                 Err(StageError::Transient(message)) => {
@@ -436,11 +501,16 @@ impl Engine {
         name: String,
         error: StageError,
     ) -> Outcome {
+        if token.is_cancelled() && !matches!(error, StageError::Fatal(_)) {
+            return Outcome::Cancelled;
+        }
+
         match error {
             StageError::Fatal(message) => {
                 self.fail_run(token, message).await;
                 Outcome::Cancelled
             }
+            StageError::Cancelled => Outcome::Cancelled,
             other => {
                 tracing::warn!(%id, %name, error = %other, "asset failed");
                 self.emit(Event::AssetFailed {
@@ -470,6 +540,25 @@ impl Engine {
             stage,
         })
         .await;
+    }
+
+    async fn wait_until_resumed(
+        &self,
+        token: &CancellationToken,
+        pause_rx: &mut watch::Receiver<bool>,
+    ) -> Result<(), ()> {
+        while *pause_rx.borrow() {
+            tokio::select! {
+                _ = token.cancelled() => return Err(()),
+                result = pause_rx.changed() => {
+                    if result.is_err() {
+                        return Err(());
+                    }
+                }
+            }
+        }
+
+        Ok(())
     }
 
     async fn emit(&self, event: Event) {

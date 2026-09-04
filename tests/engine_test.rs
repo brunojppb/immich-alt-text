@@ -1,16 +1,27 @@
 use std::time::Duration;
 
+use base64::Engine as _;
 use immich_alt_text::config::{Config, ImmichConfig, LlmConfig, RunConfig, UiConfig};
 use immich_alt_text::engine::{self, EngineOptions};
-use immich_alt_text::events::{Command, Event};
+use immich_alt_text::events::{Command, Event, Stage};
 use serde_json::json;
 use tokio::sync::mpsc;
-use wiremock::matchers::{method, path, path_regex};
+use wiremock::matchers::{body_json, body_string_contains, method, path, path_regex};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 const JPEG: &[u8] = &[0xFF, 0xD8, 0xFF, 0xE0];
 
 fn config(immich: &MockServer, llm: &MockServer) -> Config {
+    config_with_run(immich, llm, 1, 3, 10)
+}
+
+fn config_with_run(
+    immich: &MockServer,
+    llm: &MockServer,
+    workers: usize,
+    retries: u32,
+    page_size: u32,
+) -> Config {
     Config {
         immich: ImmichConfig {
             url: immich.uri(),
@@ -26,9 +37,9 @@ fn config(immich: &MockServer, llm: &MockServer) -> Config {
             prompt: "describe".into(),
         },
         run: RunConfig {
-            workers: 1,
-            retries: 3,
-            page_size: 10,
+            workers,
+            retries,
+            page_size,
         },
         ui: UiConfig::default(),
     }
@@ -41,6 +52,13 @@ fn fast() -> EngineOptions {
 }
 
 fn search_page(items: &[(&str, &str, Option<&str>)]) -> serde_json::Value {
+    search_page_with_next(items, None)
+}
+
+fn search_page_with_next(
+    items: &[(&str, &str, Option<&str>)],
+    next_page: Option<u32>,
+) -> serde_json::Value {
     let items: Vec<_> = items
         .iter()
         .map(|(id, name, desc)| {
@@ -49,7 +67,7 @@ fn search_page(items: &[(&str, &str, Option<&str>)]) -> serde_json::Value {
         })
         .collect();
     json!({ "assets": { "count": items.len(), "total": items.len(), "facets": [],
-                        "nextPage": null, "items": items } })
+                        "nextPage": next_page.map(|n| n.to_string()), "items": items } })
 }
 
 fn completion(text: &str) -> serde_json::Value {
@@ -67,6 +85,68 @@ async fn mount_immich_basics(immich: &MockServer, items: &[(&str, &str, Option<&
         .respond_with(ResponseTemplate::new(200).set_body_bytes(JPEG.to_vec()))
         .mount(immich)
         .await;
+}
+
+async fn mount_preview(immich: &MockServer, id: &str, jpeg: &[u8], delay: Duration, status: u16) {
+    Mock::given(method("GET"))
+        .and(path(format!("/api/assets/{id}/thumbnail")))
+        .respond_with(
+            ResponseTemplate::new(status)
+                .set_delay(delay)
+                .set_body_bytes(jpeg.to_vec()),
+        )
+        .mount(immich)
+        .await;
+}
+
+async fn mount_search_page(
+    immich: &MockServer,
+    page: u32,
+    size: u32,
+    items: &[(&str, &str, Option<&str>)],
+    next_page: Option<u32>,
+) {
+    Mock::given(method("POST"))
+        .and(path("/api/search/metadata"))
+        .and(body_json(json!({
+            "type": "IMAGE",
+            "withExif": true,
+            "size": size,
+            "page": page,
+            "order": "desc",
+        })))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(search_page_with_next(items, next_page)),
+        )
+        .mount(immich)
+        .await;
+}
+
+async fn assert_no_matching_event(
+    rx: &mut mpsc::Receiver<Event>,
+    within: Duration,
+    matches: impl Fn(&Event) -> bool,
+) {
+    let wait = tokio::time::timeout(within, async {
+        loop {
+            match rx.recv().await {
+                Some(event) if matches(&event) => panic!("unexpected event after stop: {event:?}"),
+                Some(_) => continue,
+                None => return,
+            }
+        }
+    })
+    .await;
+
+    if let Ok(()) = wait {}
+}
+
+fn drain_ready_events(rx: &mut mpsc::Receiver<Event>) -> Vec<Event> {
+    let mut events = Vec::new();
+    while let Ok(event) = rx.try_recv() {
+        events.push(event);
+    }
+    events
 }
 
 async fn next_event(rx: &mut mpsc::Receiver<Event>) -> Event {
@@ -478,4 +558,286 @@ async fn quit_stops_everything() {
         started.elapsed() < Duration::from_secs(2),
         "shutdown must not wait for the slow LLM call"
     );
+}
+
+#[tokio::test]
+async fn fatal_cancellation_stops_other_workers_in_writing_without_late_events() {
+    const JPEG_A1: &[u8] = &[0xFF, 0xD8, 0xFF, 0xA1];
+    const JPEG_A2: &[u8] = &[0xFF, 0xD8, 0xFF, 0xA2];
+
+    let immich = MockServer::start().await;
+    let llm = MockServer::start().await;
+    mount_search_page(
+        &immich,
+        1,
+        10,
+        &[("a1", "IMG_1.HEIC", None), ("a2", "IMG_2.HEIC", None)],
+        None,
+    )
+    .await;
+    mount_preview(&immich, "a1", JPEG_A1, Duration::ZERO, 200).await;
+    mount_preview(&immich, "a2", JPEG_A2, Duration::from_millis(50), 200).await;
+    Mock::given(method("PUT"))
+        .and(path("/api/assets/a1"))
+        .respond_with(
+            ResponseTemplate::new(500)
+                .set_delay(Duration::from_millis(200))
+                .set_body_json(json!({})),
+        )
+        .expect(1)
+        .mount(&immich)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .and(body_string_contains(
+            base64::engine::general_purpose::STANDARD.encode(JPEG_A1),
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(completion("ok 1")))
+        .expect(1)
+        .mount(&llm)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .and(body_string_contains(
+            base64::engine::general_purpose::STANDARD.encode(JPEG_A2),
+        ))
+        .respond_with(ResponseTemplate::new(401))
+        .expect(1)
+        .mount(&llm)
+        .await;
+
+    let (tx, mut rx) = mpsc::channel(256);
+    let handle = engine::spawn_with(config_with_run(&immich, &llm, 2, 3, 10), tx, fast()).unwrap();
+    handle.send(Command::Start).await;
+    collect_until(&mut rx, |event| {
+        matches!(
+            event,
+            Event::AssetStage { id, stage } if id == "a1" && *stage == Stage::Writing
+        )
+    })
+    .await;
+    let events = collect_until(&mut rx, |event| matches!(event, Event::Fatal { .. })).await;
+
+    assert!(events
+        .iter()
+        .any(|event| matches!(event, Event::Fatal { error } if error.contains("401"))));
+    assert_no_matching_event(&mut rx, Duration::from_millis(350), |event| {
+        matches!(
+            event,
+            Event::AssetDone { .. }
+                | Event::AssetFailed { .. }
+                | Event::RunFinished { .. }
+                | Event::Fatal { .. }
+        )
+    })
+    .await;
+    handle.shutdown(Duration::from_secs(1)).await;
+}
+
+#[tokio::test]
+async fn quit_command_stops_writing_retries_without_late_events() {
+    let immich = MockServer::start().await;
+    let llm = MockServer::start().await;
+    mount_immich_basics(&immich, &[("a1", "1", None)]).await;
+    Mock::given(method("PUT"))
+        .and(path("/api/assets/a1"))
+        .respond_with(
+            ResponseTemplate::new(500)
+                .set_delay(Duration::from_millis(250))
+                .set_body_json(json!({})),
+        )
+        .expect(1)
+        .mount(&immich)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(completion("ok")))
+        .mount(&llm)
+        .await;
+
+    let (tx, mut rx) = mpsc::channel(256);
+    let handle = engine::spawn_with(config(&immich, &llm), tx, fast()).unwrap();
+    handle.send(Command::Start).await;
+    collect_until(&mut rx, |event| {
+        matches!(
+            event,
+            Event::AssetStage { id, stage } if id == "a1" && *stage == Stage::Writing
+        )
+    })
+    .await;
+
+    let started = std::time::Instant::now();
+    handle.send(Command::Quit).await;
+    tokio::time::timeout(Duration::from_millis(500), async {
+        while let Some(event) = rx.recv().await {
+            assert!(
+                !matches!(
+                    event,
+                    Event::AssetDone { .. }
+                        | Event::AssetFailed { .. }
+                        | Event::RunFinished { .. }
+                        | Event::Fatal { .. }
+                ),
+                "unexpected event after quit: {event:?}"
+            );
+        }
+    })
+    .await
+    .expect("engine did not stop after quit");
+    assert!(
+        started.elapsed() < Duration::from_millis(500),
+        "quit took too long to stop the engine"
+    );
+    handle.shutdown(Duration::from_secs(1)).await;
+}
+
+#[tokio::test]
+async fn pause_prevents_new_asset_started_events_until_resume_with_multiple_workers() {
+    let immich = MockServer::start().await;
+    let llm = MockServer::start().await;
+    mount_immich_basics(
+        &immich,
+        &[
+            ("a1", "IMG_1.HEIC", None),
+            ("a2", "IMG_2.HEIC", None),
+            ("a3", "IMG_3.HEIC", None),
+        ],
+    )
+    .await;
+    Mock::given(method("PUT"))
+        .and(path_regex(r"^/api/assets/[^/]+$"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&immich)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(completion("ok"))
+                .set_delay(Duration::from_millis(150)),
+        )
+        .mount(&llm)
+        .await;
+
+    let (tx, mut rx) = mpsc::channel(256);
+    let handle = engine::spawn_with(config_with_run(&immich, &llm, 2, 3, 10), tx, fast()).unwrap();
+    handle.send(Command::Start).await;
+
+    let mut started_names = Vec::new();
+    while started_names.len() < 2 {
+        let event = next_event(&mut rx).await;
+        if let Event::AssetStarted { name, .. } = event {
+            started_names.push(name);
+        }
+    }
+
+    loop {
+        let event = next_event(&mut rx).await;
+        if matches!(event, Event::AssetDone { .. }) {
+            handle.send(Command::Pause).await;
+            break;
+        }
+    }
+    let _buffered = drain_ready_events(&mut rx);
+
+    assert_no_matching_event(&mut rx, Duration::from_millis(300), |event| {
+        matches!(event, Event::AssetStarted { .. })
+    })
+    .await;
+
+    handle.send(Command::Resume).await;
+    let events = collect_until(&mut rx, |event| matches!(event, Event::RunFinished { .. })).await;
+    assert!(matches!(
+        events.last().unwrap(),
+        Event::RunFinished {
+            done: 3,
+            failed: 0,
+            ..
+        }
+    ));
+    handle.shutdown(Duration::from_secs(1)).await;
+}
+
+#[tokio::test]
+async fn discovery_follows_next_page_and_reports_cumulative_counts() {
+    let immich = MockServer::start().await;
+    let llm = MockServer::start().await;
+    mount_search_page(
+        &immich,
+        1,
+        2,
+        &[
+            ("a1", "IMG_1.HEIC", None),
+            ("a2", "IMG_2.HEIC", Some("done")),
+        ],
+        Some(2),
+    )
+    .await;
+    mount_search_page(
+        &immich,
+        2,
+        2,
+        &[
+            ("a3", "IMG_3.HEIC", None),
+            ("a4", "IMG_4.HEIC", Some("done")),
+        ],
+        None,
+    )
+    .await;
+    mount_preview(&immich, "a1", JPEG, Duration::ZERO, 200).await;
+    mount_preview(&immich, "a3", JPEG, Duration::ZERO, 200).await;
+    Mock::given(method("PUT"))
+        .and(path("/api/assets/a1"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(1)
+        .mount(&immich)
+        .await;
+    Mock::given(method("PUT"))
+        .and(path("/api/assets/a3"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(1)
+        .mount(&immich)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(completion("ok")))
+        .expect(2)
+        .mount(&llm)
+        .await;
+
+    let (tx, mut rx) = mpsc::channel(256);
+    let handle = engine::spawn_with(config_with_run(&immich, &llm, 2, 3, 2), tx, fast()).unwrap();
+    handle.send(Command::Start).await;
+    let events = collect_until(&mut rx, |event| matches!(event, Event::RunFinished { .. })).await;
+
+    let pages: Vec<Event> = events
+        .iter()
+        .filter(|event| matches!(event, Event::PageLoaded { .. }))
+        .cloned()
+        .collect();
+    assert_eq!(
+        pages,
+        vec![
+            Event::PageLoaded {
+                scanned: 2,
+                queued: 1
+            },
+            Event::PageLoaded {
+                scanned: 4,
+                queued: 2
+            }
+        ]
+    );
+    assert!(events
+        .iter()
+        .any(|event| matches!(event, Event::DiscoveryDone { total_queued: 2 })));
+    assert!(matches!(
+        events.last().unwrap(),
+        Event::RunFinished {
+            done: 2,
+            failed: 0,
+            ..
+        }
+    ));
+    handle.shutdown(Duration::from_secs(1)).await;
 }
