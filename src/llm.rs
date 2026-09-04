@@ -178,7 +178,7 @@ mod tests {
     use std::time::Duration;
 
     use serde_json::json;
-    use wiremock::matchers::{body_partial_json, header, header_exists, method, path};
+    use wiremock::matchers::{body_json, header, header_exists, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     const JPEG: &[u8] = &[0xFF, 0xD8, 0xFF, 0xE0];
@@ -209,11 +209,15 @@ mod tests {
             .and(path("/v1/chat/completions"))
             .and(header("authorization", "Bearer sk-test"))
             .and(header("content-type", "application/json"))
-            .and(body_partial_json(json!({
+            .and(body_json(json!({
                 "model": "gemma",
                 "max_tokens": 200,
                 "messages": [ { "role": "user", "content": [
-                    { "type": "text", "text": "describe it" }
+                    { "type": "text", "text": "describe it" },
+                    {
+                        "type": "image_url",
+                        "image_url": { "url": "data:image/jpeg;base64,/9j/4A==" }
+                    }
                 ] } ]
             })))
             .respond_with(ResponseTemplate::new(200).set_body_json(ok_body("  A red bike.  \n")))
@@ -308,7 +312,7 @@ mod tests {
 
     #[tokio::test]
     async fn unauthorized_and_not_found_are_fatal() {
-        for status in [401u16, 404] {
+        for status in [401u16, 403, 404] {
             let server = MockServer::start().await;
             Mock::given(method("POST"))
                 .and(path("/v1/chat/completions"))
@@ -381,5 +385,19 @@ mod tests {
             .await;
         let err = client(&server, "k").await.ping().await.unwrap_err();
         assert!(matches!(err, LlmError::Fatal(_)), "{err}");
+    }
+
+    #[tokio::test]
+    async fn connection_refused_is_transient() {
+        let client = LlmClient::new(
+            "http://127.0.0.1:9/v1",
+            "k",
+            "gemma",
+            200,
+            Duration::from_secs(2),
+        )
+        .unwrap();
+        let err = client.ping().await.unwrap_err();
+        assert!(matches!(err, LlmError::Transient(_)), "{err}");
     }
 }
