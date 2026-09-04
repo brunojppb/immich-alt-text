@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use tokio::sync::{mpsc, watch, Mutex};
+use tokio::sync::{mpsc, oneshot, watch, Mutex};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
@@ -39,30 +39,23 @@ pub enum EngineError {
 
 /// Handle to a running engine task.
 pub struct EngineHandle {
-    cmd_tx: mpsc::Sender<Command>,
+    cmd_tx: mpsc::Sender<ControlMessage>,
     cancel: CancellationToken,
-    handoff: Arc<Mutex<()>>,
-    pause_tx: watch::Sender<bool>,
     task: JoinHandle<()>,
 }
 
 impl EngineHandle {
     /// Sends a command. Dropped silently if the engine is gone.
     pub async fn send(&self, cmd: Command) {
-        match cmd {
-            Command::Pause => {
-                let _ = self.pause_tx.send(true);
-                let guard = self.handoff.lock().await;
-                drop(guard);
-                return;
-            }
-            Command::Resume => {
-                let _ = self.pause_tx.send(false);
-                return;
-            }
-            Command::Start | Command::Quit => {}
+        let (ack_tx, ack_rx) = oneshot::channel();
+        if self
+            .cmd_tx
+            .send(ControlMessage { cmd, ack: ack_tx })
+            .await
+            .is_ok()
+        {
+            let _ = ack_rx.await;
         }
-        let _ = self.cmd_tx.send(cmd).await;
     }
 
     /// Cancels the engine and waits up to `grace` for it to stop.
@@ -98,7 +91,6 @@ pub fn spawn_with(
     let (cmd_tx, cmd_rx) = mpsc::channel(16);
     let cancel = CancellationToken::new();
     let handoff = Arc::new(Mutex::new(()));
-    let (pause_tx, _) = watch::channel(false);
     let engine = Arc::new(Engine {
         immich,
         llm,
@@ -107,14 +99,11 @@ pub fn spawn_with(
         events,
         cancel: cancel.clone(),
         handoff: handoff.clone(),
-        pause_tx: pause_tx.clone(),
     });
     let task = tokio::spawn(engine.control_loop(cmd_rx));
     Ok(EngineHandle {
         cmd_tx,
         cancel,
-        handoff,
-        pause_tx,
         task,
     })
 }
@@ -127,7 +116,6 @@ struct Engine {
     events: mpsc::Sender<Event>,
     cancel: CancellationToken,
     handoff: Arc<Mutex<()>>,
-    pause_tx: watch::Sender<bool>,
 }
 
 /// One run: discovery plus workers. Dropped when the next run starts.
@@ -135,7 +123,13 @@ struct Run {
     token: CancellationToken,
     /// Cleared just before `RunFinished` so a new `Start` is accepted at once.
     active: Arc<AtomicBool>,
+    pause_tx: watch::Sender<bool>,
     task: JoinHandle<()>,
+}
+
+struct ControlMessage {
+    cmd: Command,
+    ack: oneshot::Sender<()>,
 }
 
 enum Outcome {
@@ -179,14 +173,14 @@ impl From<LlmError> for StageError {
 }
 
 impl Engine {
-    async fn control_loop(self: Arc<Self>, mut cmd_rx: mpsc::Receiver<Command>) {
+    async fn control_loop(self: Arc<Self>, mut cmd_rx: mpsc::Receiver<ControlMessage>) {
         let mut run: Option<Run> = None;
 
         loop {
             tokio::select! {
                 _ = self.cancel.cancelled() => break,
                 cmd = cmd_rx.recv() => {
-                    let Some(cmd) = cmd else { break };
+                    let Some(ControlMessage { cmd, ack }) = cmd else { break };
                     match cmd {
                         Command::Start => {
                             let busy = run.as_ref().is_some_and(|run| {
@@ -198,10 +192,25 @@ impl Engine {
                                 }
                                 run = Some(self.clone().start_run());
                             }
+                            let _ = ack.send(());
                         }
-                        Command::Pause | Command::Resume => {}
+                        Command::Pause => {
+                            if let Some(run) = run.as_ref() {
+                                let _ = run.pause_tx.send(true);
+                                let handoff_guard = self.handoff.lock().await;
+                                drop(handoff_guard);
+                            }
+                            let _ = ack.send(());
+                        }
+                        Command::Resume => {
+                            if let Some(run) = run.as_ref() {
+                                let _ = run.pause_tx.send(false);
+                            }
+                            let _ = ack.send(());
+                        }
                         Command::Quit => {
                             self.cancel.cancel();
+                            let _ = ack.send(());
                             break;
                         }
                     }
@@ -216,13 +225,13 @@ impl Engine {
 
     fn start_run(self: Arc<Self>) -> Run {
         let token = self.cancel.child_token();
-        let _previous = self.pause_tx.send_replace(false);
-        let pause_rx = self.pause_tx.subscribe();
+        let (pause_tx, pause_rx) = watch::channel(false);
         let active = Arc::new(AtomicBool::new(true));
         let task = tokio::spawn(self.run(token.clone(), pause_rx, active.clone()));
         Run {
             token,
             active,
+            pause_tx,
             task,
         }
     }
@@ -560,8 +569,8 @@ impl Engine {
         }
 
         tracing::error!(error = %message, "run stopped");
-        self.emit(Event::Fatal { error: message }).await;
         token.cancel();
+        self.emit(Event::Fatal { error: message }).await;
     }
 
     async fn stage(&self, token: &CancellationToken, id: &str, stage: Stage) -> bool {
@@ -604,6 +613,7 @@ impl Engine {
         }
 
         tokio::select! {
+            biased;
             _ = token.cancelled() => false,
             result = self.events.send(event) => result.is_ok(),
         }

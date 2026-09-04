@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use std::time::Duration;
 
 use base64::Engine as _;
@@ -5,9 +6,9 @@ use immich_alt_text::config::{Config, ImmichConfig, LlmConfig, RunConfig, UiConf
 use immich_alt_text::engine::{self, EngineOptions};
 use immich_alt_text::events::{Command, Event, Stage};
 use serde_json::json;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Notify};
 use wiremock::matchers::{body_json, body_string_contains, method, path, path_regex};
-use wiremock::{Mock, MockServer, ResponseTemplate};
+use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
 
 const JPEG: &[u8] = &[0xFF, 0xD8, 0xFF, 0xE0];
 
@@ -72,6 +73,18 @@ fn search_page_with_next(
 
 fn completion(text: &str) -> serde_json::Value {
     json!({ "choices": [ { "index": 0, "message": { "role": "assistant", "content": text } } ] })
+}
+
+struct NotifyResponder {
+    notify: Arc<Notify>,
+    status: u16,
+}
+
+impl Respond for NotifyResponder {
+    fn respond(&self, _request: &Request) -> ResponseTemplate {
+        self.notify.notify_one();
+        ResponseTemplate::new(self.status)
+    }
 }
 
 async fn mount_immich_basics(immich: &MockServer, items: &[(&str, &str, Option<&str>)]) {
@@ -910,6 +923,64 @@ async fn start_after_paused_fatal_run_does_not_inherit_pause_state() {
 }
 
 #[tokio::test]
+async fn immediate_pause_after_start_is_not_lost() {
+    let immich = MockServer::start().await;
+    let llm = MockServer::start().await;
+    mount_immich_basics(&immich, &[("a1", "IMG_1.HEIC", None)]).await;
+    Mock::given(method("PUT"))
+        .and(path("/api/assets/a1"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(1)
+        .mount(&immich)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(completion("ok"))
+                .set_delay(Duration::from_millis(100)),
+        )
+        .expect(1)
+        .mount(&llm)
+        .await;
+
+    let (tx, mut rx) = mpsc::channel(256);
+    let handle = engine::spawn_with(config(&immich, &llm), tx, fast()).unwrap();
+    handle.send(Command::Start).await;
+    handle.send(Command::Pause).await;
+
+    let paused_events = collect_until(&mut rx, |event| {
+        matches!(event, Event::DiscoveryDone { total_queued: 1 })
+    })
+    .await;
+    assert!(
+        !paused_events
+            .iter()
+            .any(|event| matches!(event, Event::AssetStarted { .. })),
+        "pause was lost before discovery completed: {paused_events:?}"
+    );
+    assert_no_matching_event(&mut rx, Duration::from_millis(200), |event| {
+        matches!(event, Event::AssetStarted { .. })
+    })
+    .await;
+
+    handle.send(Command::Resume).await;
+    let events = collect_until(&mut rx, |event| matches!(event, Event::RunFinished { .. })).await;
+    assert!(events
+        .iter()
+        .any(|event| matches!(event, Event::AssetStarted { id, .. } if id == "a1")));
+    assert!(matches!(
+        events.last().unwrap(),
+        Event::RunFinished {
+            done: 1,
+            failed: 0,
+            ..
+        }
+    ));
+    handle.shutdown(Duration::from_secs(1)).await;
+}
+
+#[tokio::test]
 async fn quit_drops_blocked_non_terminal_events_after_cancellation() {
     let immich = MockServer::start().await;
     let llm = MockServer::start().await;
@@ -946,5 +1017,63 @@ async fn quit_drops_blocked_non_terminal_events_after_cancellation() {
         Event::AssetStage { id, stage } if id == "a1" && stage == Stage::CallingLlm
     ));
     assert_no_matching_event(&mut rx, Duration::from_millis(300), |_| true).await;
+    handle.shutdown(Duration::from_secs(1)).await;
+}
+
+#[tokio::test]
+async fn fatal_cancellation_wins_over_saturated_non_terminal_events() {
+    let immich = MockServer::start().await;
+    let llm = MockServer::start().await;
+    let fatal_response = Arc::new(Notify::new());
+    mount_search_page(&immich, 1, 1, &[("a1", "IMG_1.HEIC", None)], Some(2)).await;
+    Mock::given(method("POST"))
+        .and(path("/api/search/metadata"))
+        .and(body_json(json!({
+            "type": "IMAGE",
+            "withExif": true,
+            "size": 1,
+            "page": 2,
+            "order": "desc",
+        })))
+        .respond_with(NotifyResponder {
+            notify: fatal_response.clone(),
+            status: 401,
+        })
+        .expect(1)
+        .mount(&immich)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/assets/a1/thumbnail"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(JPEG.to_vec()))
+        .expect(0)
+        .mount(&immich)
+        .await;
+
+    let (tx, mut rx) = mpsc::channel(1);
+    let handle = engine::spawn_with(config_with_run(&immich, &llm, 1, 3, 1), tx, fast()).unwrap();
+    handle.send(Command::Start).await;
+    fatal_response.notified().await;
+    for _ in 0..8 {
+        tokio::task::yield_now().await;
+    }
+
+    let first = next_event(&mut rx).await;
+    assert_eq!(
+        first,
+        Event::PageLoaded {
+            scanned: 1,
+            queued: 1
+        }
+    );
+
+    let fatal = next_event(&mut rx).await;
+    assert!(
+        matches!(fatal, Event::Fatal { ref error } if error.contains("401")),
+        "expected Fatal after cancellation won the race, got {fatal:?}"
+    );
+    assert_no_matching_event(&mut rx, Duration::from_millis(200), |event| {
+        !matches!(event, Event::Fatal { .. })
+    })
+    .await;
     handle.shutdown(Duration::from_secs(1)).await;
 }
