@@ -480,8 +480,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn connection_refused_is_transient() {
-        let c = ImmichClient::new("http://127.0.0.1:9", "k", Duration::from_secs(2)).unwrap();
+    async fn request_timeout_is_transient() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/server/version"))
+            .respond_with(ResponseTemplate::new(200).set_delay(Duration::from_millis(200)))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let c = ImmichClient::new(&server.uri(), "k", Duration::from_millis(20)).unwrap();
         let err = c.version().await.unwrap_err();
         assert!(matches!(err, ImmichError::Transient(_)), "{err}");
     }

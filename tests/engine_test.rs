@@ -1,3 +1,4 @@
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex as StdMutex};
 use std::time::Duration;
 
@@ -91,6 +92,7 @@ impl Respond for NotifyResponder {
 #[derive(Default)]
 struct ResponseGate {
     requested: Notify,
+    request_count: AtomicUsize,
     released: StdMutex<bool>,
     release: Condvar,
 }
@@ -109,6 +111,10 @@ impl ResponseGate {
         *self.released.lock().expect("response gate poisoned") = true;
         self.release.notify_all();
     }
+
+    fn request_count(&self) -> usize {
+        self.request_count.load(Ordering::Acquire)
+    }
 }
 
 struct GatedResponder {
@@ -118,6 +124,7 @@ struct GatedResponder {
 
 impl Respond for GatedResponder {
     fn respond(&self, _request: &Request) -> ResponseTemplate {
+        self.gate.request_count.fetch_add(1, Ordering::Release);
         self.gate.requested.notify_one();
         self.gate.wait_until_released();
         ResponseTemplate::new(self.status)
@@ -1026,6 +1033,74 @@ async fn immediate_pause_after_start_is_not_lost() {
 }
 
 #[tokio::test]
+async fn pause_acknowledges_while_capacity_one_events_are_saturated() {
+    let immich = MockServer::start().await;
+    let llm = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/search/metadata"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_delay(Duration::from_millis(50))
+                .set_body_json(search_page(&[("a1", "IMG_1.HEIC", None)])),
+        )
+        .expect(1)
+        .mount(&immich)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/assets/a1/thumbnail"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(JPEG.to_vec()))
+        .expect(1)
+        .mount(&immich)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(completion("description")))
+        .expect(1)
+        .mount(&llm)
+        .await;
+    Mock::given(method("PUT"))
+        .and(path("/api/assets/a1"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(1)
+        .mount(&immich)
+        .await;
+
+    let (tx, mut rx) = mpsc::channel(1);
+    let fill_events = tx.clone();
+    let handle = engine::spawn_with(config(&immich, &llm), tx, fast()).unwrap();
+    handle.send(Command::Start).await;
+    handle.send(Command::Pause).await;
+    let paused_events = collect_until(&mut rx, |event| {
+        matches!(event, Event::DiscoveryDone { total_queued: 1 })
+    })
+    .await;
+    assert!(!paused_events
+        .iter()
+        .any(|event| matches!(event, Event::AssetStarted { .. })));
+
+    fill_events
+        .send(Event::Fatal {
+            error: "capacity filler".into(),
+        })
+        .await
+        .expect("event receiver is open");
+    handle.send(Command::Resume).await;
+    tokio::task::yield_now().await;
+
+    tokio::time::timeout(Duration::from_millis(100), handle.send(Command::Pause))
+        .await
+        .expect("Pause was not acknowledged while the event channel was full");
+
+    assert!(matches!(
+        next_event(&mut rx).await,
+        Event::Fatal { error } if error == "capacity filler"
+    ));
+    handle.send(Command::Resume).await;
+    collect_until(&mut rx, |event| matches!(event, Event::RunFinished { .. })).await;
+    handle.shutdown(Duration::from_secs(1)).await;
+}
+
+#[tokio::test]
 async fn quit_drops_blocked_non_terminal_events_after_cancellation() {
     let immich = MockServer::start().await;
     let llm = MockServer::start().await;
@@ -1119,6 +1194,69 @@ async fn shutdown_conclusively_stops_old_handle_before_replacement_runs() {
         old_closed,
         "old engine tasks still held the event channel while replacement ran"
     );
+}
+
+#[tokio::test]
+async fn replacement_waits_for_same_asset_put_response_before_starting() {
+    let immich = MockServer::start().await;
+    let llm = MockServer::start().await;
+    let write_gate = Arc::new(ResponseGate::default());
+    let _release_on_drop = ReleaseOnDrop(write_gate.clone());
+    mount_immich_basics(&immich, &[("a1", "IMG_1.HEIC", None)]).await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(completion("description")))
+        .expect(2)
+        .mount(&llm)
+        .await;
+    Mock::given(method("PUT"))
+        .and(path("/api/assets/a1"))
+        .respond_with(GatedResponder {
+            gate: write_gate.clone(),
+            status: 200,
+        })
+        .expect(2)
+        .mount(&immich)
+        .await;
+
+    let (old_tx, _old_rx) = mpsc::channel(256);
+    let old = engine::spawn_with(config(&immich, &llm), old_tx, fast()).unwrap();
+    old.send(Command::Start).await;
+    tokio::time::timeout(Duration::from_secs(1), write_gate.requested.notified())
+        .await
+        .expect("old engine did not reach its gated write");
+
+    let (new_tx, mut new_rx) = mpsc::channel(256);
+    let replacement = engine::prepare_with(config(&immich, &llm), new_tx, fast()).unwrap();
+    let mut replace = tokio::spawn(async move {
+        old.shutdown_for_replacement().await;
+        let new = replacement.start();
+        new.send(Command::Start).await;
+        new
+    });
+
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), &mut replace)
+            .await
+            .is_err(),
+        "replacement started while the old PUT response was pending"
+    );
+    assert_eq!(
+        write_gate.request_count(),
+        1,
+        "two writes for the same asset overlapped on the same server"
+    );
+
+    write_gate.release();
+    let new = tokio::time::timeout(Duration::from_secs(2), replace)
+        .await
+        .expect("replacement did not start after the old response was released")
+        .expect("replacement task panicked");
+    collect_until(&mut new_rx, |event| {
+        matches!(event, Event::RunFinished { .. })
+    })
+    .await;
+    new.shutdown(Duration::from_secs(1)).await;
 }
 
 #[tokio::test]

@@ -17,7 +17,7 @@ start the run at any time. Hand-written descriptions are never touched.
 
 ## Requirements
 
-- Rust 1.85 or newer.
+- Rust 1.88 or newer.
 - An Immich server and an API key (Account settings → API keys).
 - A vision model behind an OpenAI-compatible API. Tested with LM Studio at
   `http://localhost:1234/v1`. Ollama, llama.cpp server, vLLM, OpenRouter, and OpenAI
@@ -71,9 +71,9 @@ visible. No preamble, no quotes, no "This image shows".
 """
 
 [run]
-workers = 1             # parallel LLM calls
-retries = 3             # retries after the first try, backoff 2 s, 4 s, 8 s
-page_size = 1000
+workers = 1             # parallel LLM calls, 1–64
+retries = 3             # 0–10 retries; default backoff is 2 s, 4 s, 8 s
+page_size = 1000        # 1–1000
 
 [ui]
 theme = "btop"          # or "mono"
@@ -84,8 +84,8 @@ settings screen covers the rest.
 
 ## Logs
 
-A debug log goes to `~/.local/state/immich-alt-text/debug.log`. Set `RUST_LOG=debug`
-for more detail. Request bodies and keys are never logged.
+UTC daily logs are named `~/.local/state/immich-alt-text/debug.log.YYYY-MM-DD`.
+Set `RUST_LOG=debug` for more detail. Request bodies and keys are never logged.
 
 ## Try it without a real library
 

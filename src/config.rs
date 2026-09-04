@@ -1,11 +1,20 @@
 //! Configuration file: structs, defaults, load, save, validation.
 
+use std::ffi::OsString;
+use std::fs::{File, OpenOptions};
+use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::{Deserialize, Serialize};
 
 /// Prompt used when the config file does not set `llm.prompt`.
 pub const DEFAULT_PROMPT: &str = "Write alt text for this photo: one or two plain sentences describing what is visible. No preamble, no quotes, no \"This image shows\".";
+pub const MAX_WORKERS: usize = 64;
+pub const MAX_RETRIES: u32 = 10;
+pub const MAX_PAGE_SIZE: u32 = 1000;
+
+static TEMP_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// Whole config file. Missing keys take defaults.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
@@ -161,8 +170,23 @@ pub fn load(path: &Path) -> Result<Option<Config>, ConfigError> {
     Ok(Some(config))
 }
 
-/// Validates, then writes the file with owner-only permissions.
+/// Validates, then atomically replaces the file with owner-only permissions.
 pub fn save(path: &Path, config: &Config) -> Result<(), ConfigError> {
+    save_with_checkpoint(path, config, |_| Ok(()))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SaveStage {
+    Write,
+    Flush,
+    Sync,
+}
+
+fn save_with_checkpoint(
+    path: &Path,
+    config: &Config,
+    mut checkpoint: impl FnMut(SaveStage) -> std::io::Result<()>,
+) -> Result<(), ConfigError> {
     config.validate()?;
 
     let io = |source| ConfigError::Io {
@@ -170,42 +194,108 @@ pub fn save(path: &Path, config: &Config) -> Result<(), ConfigError> {
         source,
     };
 
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir).map_err(io)?;
-    }
-
     let text = toml::to_string_pretty(config)?;
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    std::fs::create_dir_all(parent).map_err(&io)?;
 
-    #[cfg(unix)]
-    {
-        use std::io::Write;
-
-        let mut file = create_owner_only_file(path).map_err(io)?;
-        file.write_all(text.as_bytes()).map_err(io)?;
-        file.flush().map_err(io)?;
-    }
-
-    #[cfg(not(unix))]
-    {
-        std::fs::write(path, text).map_err(io)?;
-    }
+    let (mut file, pending) = create_temp_file(path).map_err(&io)?;
+    checkpoint(SaveStage::Write).map_err(&io)?;
+    file.write_all(text.as_bytes()).map_err(&io)?;
+    checkpoint(SaveStage::Flush).map_err(&io)?;
+    file.flush().map_err(&io)?;
+    checkpoint(SaveStage::Sync).map_err(&io)?;
+    file.sync_all().map_err(&io)?;
+    drop(file);
+    pending.persist(path).map_err(&io)?;
 
     Ok(())
 }
 
-#[cfg(unix)]
-fn create_owner_only_file(path: &Path) -> std::io::Result<std::fs::File> {
-    use std::fs::OpenOptions;
-    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+struct PendingTempFile {
+    path: PathBuf,
+    persisted: bool,
+}
 
-    let file = OpenOptions::new()
-        .create(true)
-        .truncate(true)
-        .write(true)
-        .mode(0o600)
-        .open(path)?;
+impl PendingTempFile {
+    fn persist(mut self, destination: &Path) -> std::io::Result<()> {
+        std::fs::rename(&self.path, destination)?;
+        self.persisted = true;
+        Ok(())
+    }
+}
 
-    file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+impl Drop for PendingTempFile {
+    fn drop(&mut self) {
+        if !self.persisted {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+}
+
+fn create_temp_file(path: &Path) -> std::io::Result<(File, PendingTempFile)> {
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let file_name = path.file_name().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "config path must name a file",
+        )
+    })?;
+
+    for _ in 0..128 {
+        let sequence = TEMP_FILE_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let mut temp_name = OsString::from(".");
+        temp_name.push(file_name);
+        temp_name.push(format!(".{}.{sequence}.tmp", std::process::id()));
+        let temp_path = parent.join(temp_name);
+
+        match create_owner_only_file(&temp_path) {
+            Ok(file) => {
+                return Ok((
+                    file,
+                    PendingTempFile {
+                        path: temp_path,
+                        persisted: false,
+                    },
+                ));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error),
+        }
+    }
+
+    Err(std::io::Error::new(
+        std::io::ErrorKind::AlreadyExists,
+        "could not create a unique config temporary file",
+    ))
+}
+
+fn create_owner_only_file(path: &Path) -> std::io::Result<File> {
+    let mut options = OpenOptions::new();
+    options.create_new(true).write(true);
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+
+    let file = options.open(path)?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Err(error) = file.set_permissions(std::fs::Permissions::from_mode(0o600)) {
+            drop(file);
+            let _ = std::fs::remove_file(path);
+            return Err(error);
+        }
+    }
 
     Ok(file)
 }
@@ -239,11 +329,20 @@ impl Config {
         if self.llm.max_tokens == 0 {
             return Err(invalid("llm.max_tokens must be at least 1"));
         }
-        if self.run.workers == 0 {
-            return Err(invalid("run.workers must be at least 1"));
+        if !(1..=MAX_WORKERS).contains(&self.run.workers) {
+            return Err(invalid(format!(
+                "run.workers must be between 1 and {MAX_WORKERS}"
+            )));
         }
-        if !(1..=1000).contains(&self.run.page_size) {
-            return Err(invalid("run.page_size must be between 1 and 1000"));
+        if self.run.retries > MAX_RETRIES {
+            return Err(invalid(format!(
+                "run.retries must be at most {MAX_RETRIES}"
+            )));
+        }
+        if !(1..=MAX_PAGE_SIZE).contains(&self.run.page_size) {
+            return Err(invalid(format!(
+                "run.page_size must be between 1 and {MAX_PAGE_SIZE}"
+            )));
         }
 
         Ok(())
@@ -333,6 +432,62 @@ mod tests {
     }
 
     #[test]
+    fn failed_write_flush_or_sync_preserves_existing_config() {
+        for fail_at in [SaveStage::Write, SaveStage::Flush, SaveStage::Sync] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("config.toml");
+            let original = b"existing config\n";
+            std::fs::write(&path, original).unwrap();
+
+            let result = save_with_checkpoint(&path, &full(), |stage| {
+                if stage == fail_at {
+                    Err(std::io::Error::other("injected save failure"))
+                } else {
+                    Ok(())
+                }
+            });
+
+            assert!(result.is_err(), "{fail_at:?} must fail the save");
+            assert_eq!(std::fs::read(&path).unwrap(), original, "{fail_at:?}");
+            let entries = std::fs::read_dir(dir.path()).unwrap().count();
+            assert_eq!(entries, 1, "temporary file leaked after {fail_at:?}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn save_stages_owner_only_temp_in_destination_directory() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "existing config\n").unwrap();
+        let mut inspected = false;
+
+        save_with_checkpoint(&path, &full(), |stage| {
+            if stage == SaveStage::Write {
+                let temp = std::fs::read_dir(dir.path())?
+                    .filter_map(Result::ok)
+                    .map(|entry| entry.path())
+                    .find(|entry| entry != &path)
+                    .ok_or_else(|| std::io::Error::other("temporary file was not staged"))?;
+                let mode = std::fs::metadata(&temp)?.permissions().mode() & 0o777;
+                if temp.parent() != Some(dir.path()) || mode != 0o600 {
+                    return Err(std::io::Error::other(
+                        "temporary file was not same-directory and owner-only",
+                    ));
+                }
+                inspected = true;
+            }
+            Ok(())
+        })
+        .unwrap();
+
+        assert!(inspected);
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[test]
     fn missing_file_loads_as_none() {
         let dir = tempfile::tempdir().unwrap();
         assert!(load(&dir.path().join("nope.toml")).unwrap().is_none());
@@ -381,6 +536,33 @@ mod tests {
         let mut cfg = full();
         cfg.run.page_size = 1001;
         assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn rejects_extreme_worker_retry_and_page_limits() {
+        let mut cfg = full();
+        cfg.run.workers = usize::MAX;
+        assert!(cfg
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("run.workers"));
+
+        let mut cfg = full();
+        cfg.run.retries = u32::MAX;
+        assert!(cfg
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("run.retries"));
+
+        let mut cfg = full();
+        cfg.run.page_size = u32::MAX;
+        assert!(cfg
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("run.page_size"));
     }
 
     #[test]

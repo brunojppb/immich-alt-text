@@ -65,6 +65,7 @@ pub enum Event {
     },
     /// Result of a settings-screen connection test. `Ok` holds a short status text.
     ConnectionTest {
+        id: u64,
         immich: Result<String, String>,
         llm: Result<String, String>,
     },
@@ -101,7 +102,10 @@ pub enum Key {
 pub enum Action {
     Send(Command),
     /// Test the connections described by this candidate config.
-    TestConnections(Config),
+    TestConnections {
+        id: u64,
+        config: Config,
+    },
     SaveConfig(Config),
     Quit,
 }

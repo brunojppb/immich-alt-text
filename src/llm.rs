@@ -388,13 +388,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn connection_refused_is_transient() {
+    async fn request_timeout_is_transient() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/models"))
+            .respond_with(ResponseTemplate::new(200).set_delay(Duration::from_millis(200)))
+            .expect(1)
+            .mount(&server)
+            .await;
         let client = LlmClient::new(
-            "http://127.0.0.1:9/v1",
+            &format!("{}/v1", server.uri()),
             "k",
             "gemma",
             200,
-            Duration::from_secs(2),
+            Duration::from_millis(20),
         )
         .unwrap();
         let err = client.ping().await.unwrap_err();

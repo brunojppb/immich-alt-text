@@ -2,7 +2,7 @@
 name = "immich-alt-text"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.85"
+rust-version = "1.88"
 description = "Describe Immich photos with a vision LLM from a terminal UI"
 license = "MIT"
 

@@ -71,6 +71,7 @@ pub struct App {
     pub settings: SettingsForm,
     pub footer_message: Option<String>,
     pub should_quit: bool,
+    connection_test_id: u64,
 }
 
 impl App {
@@ -100,6 +101,7 @@ impl App {
             settings,
             footer_message: None,
             should_quit: false,
+            connection_test_id: 0,
         }
     }
 
@@ -170,10 +172,11 @@ impl App {
                 self.in_flight.clear();
                 self.run_state = RunState::Error(error);
             }
-            Event::ConnectionTest { immich, llm } => {
+            Event::ConnectionTest { id, immich, llm } if id == self.connection_test_id => {
                 self.settings.testing = false;
                 self.settings.test_result = Some((immich, llm));
             }
+            Event::ConnectionTest { .. } => {}
         }
     }
 
@@ -190,6 +193,7 @@ impl App {
 
     /// Commits a candidate after persistence and engine replacement both succeed.
     pub fn config_save_succeeded(&mut self, config: Config) {
+        self.invalidate_connection_test();
         self.config = config;
         self.settings = SettingsForm::from_config(&self.config);
         self.reset_to_idle();
@@ -291,6 +295,7 @@ impl App {
                 Some(Action::Send(Command::Resume))
             }
             Key::Char('c') => {
+                self.invalidate_connection_test();
                 self.settings = SettingsForm::from_config(&self.config);
                 self.footer_message = None;
                 self.screen = Screen::Settings;
@@ -319,6 +324,7 @@ impl App {
     fn on_settings_key(&mut self, key: Key) -> Option<Action> {
         match key {
             Key::Esc => {
+                self.invalidate_connection_test();
                 self.screen = Screen::Run;
                 None
             }
@@ -349,10 +355,11 @@ impl App {
             }
             Key::CtrlT => match self.settings.to_config(&self.config) {
                 Ok(config) => {
+                    let id = self.next_connection_test_id();
                     self.settings.testing = true;
                     self.settings.test_result = None;
                     self.settings.message = None;
-                    Some(Action::TestConnections(config))
+                    Some(Action::TestConnections { id, config })
                 }
                 Err(message) => {
                     self.settings.message = Some(message);
@@ -377,6 +384,16 @@ impl App {
                 None
             }
         }
+    }
+
+    fn next_connection_test_id(&mut self) -> u64 {
+        self.connection_test_id = self.connection_test_id.wrapping_add(1);
+        self.connection_test_id
+    }
+
+    fn invalidate_connection_test(&mut self) {
+        self.next_connection_test_id();
+        self.settings.testing = false;
     }
 
     fn can_start(&self) -> bool {
@@ -810,12 +827,13 @@ mod tests {
     fn connection_test_round_trip() {
         let mut a = app();
         a.on_key(Key::Char('c'));
-        assert!(matches!(
-            a.on_key(Key::CtrlT),
-            Some(Action::TestConnections(_))
-        ));
+        let id = match a.on_key(Key::CtrlT) {
+            Some(Action::TestConnections { id, .. }) => id,
+            other => panic!("{other:?}"),
+        };
         assert!(a.settings.testing);
         a.on_event(Event::ConnectionTest {
+            id,
             immich: Ok("v3.1.0".into()),
             llm: Err("HTTP 401".into()),
         });
@@ -823,6 +841,37 @@ mod tests {
         let (i, l) = a.settings.test_result.clone().unwrap();
         assert_eq!(i, Ok("v3.1.0".into()));
         assert_eq!(l, Err("HTTP 401".into()));
+    }
+
+    #[test]
+    fn stale_connection_test_result_cannot_overwrite_newer_result() {
+        let mut a = app();
+        a.on_key(Key::Char('c'));
+        let first = match a.on_key(Key::CtrlT) {
+            Some(Action::TestConnections { id, .. }) => id,
+            other => panic!("{other:?}"),
+        };
+        let second = match a.on_key(Key::CtrlT) {
+            Some(Action::TestConnections { id, .. }) => id,
+            other => panic!("{other:?}"),
+        };
+
+        a.on_event(Event::ConnectionTest {
+            id: second,
+            immich: Ok("new immich".into()),
+            llm: Ok("new llm".into()),
+        });
+        a.on_event(Event::ConnectionTest {
+            id: first,
+            immich: Err("stale immich".into()),
+            llm: Err("stale llm".into()),
+        });
+
+        assert_eq!(
+            a.settings.test_result,
+            Some((Ok("new immich".into()), Ok("new llm".into())))
+        );
+        assert!(!a.settings.testing);
     }
 
     #[test]

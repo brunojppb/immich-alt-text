@@ -69,6 +69,12 @@ impl EngineHandle {
             let _ = self.task.await;
         }
     }
+
+    /// Stops before replacement without aborting an in-flight Immich write.
+    pub async fn shutdown_for_replacement(self) {
+        self.cancel.cancel();
+        let _ = self.task.await;
+    }
 }
 
 /// A fully validated engine that owns no running tasks until `start` is called.
@@ -321,7 +327,7 @@ impl Engine {
     ) {
         let started = Instant::now();
         let workers = self.config.run.workers.max(1);
-        let (asset_tx, asset_rx) = mpsc::channel::<Asset>(workers * 4);
+        let (asset_tx, asset_rx) = mpsc::channel::<Asset>(workers.saturating_mul(4));
         let asset_rx = Arc::new(Mutex::new(asset_rx));
         let done = Arc::new(AtomicU64::new(0));
         let failed = Arc::new(AtomicU64::new(0));
@@ -407,13 +413,13 @@ impl Engine {
                 }
             };
 
-            scanned += page_data.items.len() as u64;
+            scanned = scanned.saturating_add(page_data.items.len() as u64);
             let wanted: Vec<Asset> = page_data
                 .items
                 .into_iter()
                 .filter(|asset| asset.needs_description())
                 .collect();
-            queued += wanted.len() as u64;
+            queued = queued.saturating_add(wanted.len() as u64);
             let _ = self
                 .emit_run(&token, Event::PageLoaded { scanned, queued })
                 .await;
@@ -479,6 +485,14 @@ impl Engine {
                 }
             };
 
+            let event_permit = tokio::select! {
+                biased;
+                _ = token.cancelled() => return,
+                permit = self.events.reserve() => match permit {
+                    Ok(permit) => permit,
+                    Err(_) => return,
+                },
+            };
             {
                 let handoff_guard = self.handoff.lock().await;
                 if token.is_cancelled() {
@@ -489,19 +503,10 @@ impl Engine {
                     pending = Some(asset);
                     continue;
                 }
-                if !self
-                    .emit_run(
-                        &token,
-                        Event::AssetStarted {
-                            id: asset.id.clone(),
-                            name: asset.name.clone(),
-                        },
-                    )
-                    .await
-                {
-                    drop(handoff_guard);
-                    return;
-                }
+                event_permit.send(Event::AssetStarted {
+                    id: asset.id.clone(),
+                    name: asset.name.clone(),
+                });
                 drop(handoff_guard);
             }
 
@@ -607,7 +612,7 @@ impl Engine {
         Fut: Future<Output = Result<T, E>>,
         E: Into<StageError>,
     {
-        let attempts = self.config.run.retries + 1;
+        let attempts = self.config.run.retries.saturating_add(1);
         let mut attempt = 1u32;
 
         loop {
@@ -627,7 +632,8 @@ impl Engine {
             match result {
                 Ok(value) => return Ok(value),
                 Err(StageError::Transient(message)) if attempt < attempts => {
-                    let delay = self.options.backoff_base * 2u32.pow(attempt - 1);
+                    let multiplier = 2u32.saturating_pow(attempt.saturating_sub(1));
+                    let delay = self.options.backoff_base.saturating_mul(multiplier);
                     tracing::warn!(
                         attempt,
                         delay_ms = delay.as_millis() as u64,
@@ -638,7 +644,7 @@ impl Engine {
                         _ = token.cancelled() => return Err(StageError::Cancelled),
                         _ = tokio::time::sleep(delay) => {}
                     }
-                    attempt += 1;
+                    attempt = attempt.saturating_add(1);
                 }
                 Err(StageError::Transient(message)) => {
                     return Err(StageError::Transient(format!(
@@ -755,14 +761,17 @@ impl Engine {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::AtomicU64;
     use std::sync::Arc;
+    use std::time::Duration;
 
-    use tokio::sync::{mpsc, Barrier};
+    use tokio::sync::{mpsc, watch, Barrier, Mutex};
     use tokio_util::sync::CancellationToken;
 
     use super::prepare;
     use crate::config::{Config, ImmichConfig, LlmConfig, RunConfig, UiConfig};
     use crate::events::Event;
+    use crate::immich::Asset;
 
     fn config() -> Config {
         Config {
@@ -824,5 +833,53 @@ mod tests {
         );
         assert!(!blocked_send.await.expect("send task did not panic"));
         assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn pause_handoff_is_acknowledged_when_capacity_one_events_are_saturated() {
+        let (events, _rx) = mpsc::channel(1);
+        events
+            .send(Event::DiscoveryDone { total_queued: 0 })
+            .await
+            .expect("event receiver is open");
+        let engine = prepare(config(), events).expect("valid engine").engine;
+        let token = CancellationToken::new();
+        let terminal_cancel = CancellationToken::new();
+        let (pause_tx, pause_rx) = watch::channel(false);
+        let (asset_tx, asset_rx) = mpsc::channel(1);
+        asset_tx
+            .send(Asset {
+                id: "a1".into(),
+                name: "IMG_1.HEIC".into(),
+                description: None,
+            })
+            .await
+            .expect("asset receiver is open");
+
+        let worker = tokio::spawn(engine.clone().worker(
+            token.clone(),
+            terminal_cancel,
+            pause_rx,
+            Arc::new(Mutex::new(asset_rx)),
+            Arc::new(AtomicU64::new(0)),
+            Arc::new(AtomicU64::new(0)),
+        ));
+        while asset_tx.capacity() == 0 {
+            tokio::task::yield_now().await;
+        }
+        tokio::task::yield_now().await;
+
+        pause_tx
+            .send(true)
+            .expect("worker still receives pause state");
+        tokio::time::timeout(Duration::from_millis(100), async {
+            let handoff = engine.handoff.lock().await;
+            drop(handoff);
+        })
+        .await
+        .expect("Pause acknowledgement blocked behind a full event channel");
+
+        token.cancel();
+        worker.await.expect("worker did not panic");
     }
 }
