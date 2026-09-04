@@ -359,8 +359,7 @@ impl App {
         match self.settings.to_config(&self.config) {
             Ok(config) => {
                 self.config = config.clone();
-                self.run_state = RunState::Idle;
-                self.in_flight.clear();
+                self.reset_to_idle();
                 self.screen = Screen::Run;
                 self.footer_message = Some("settings saved".into());
                 Some(Action::SaveConfig(config))
@@ -391,6 +390,20 @@ impl App {
         self.run_started = Some(Instant::now());
         self.run_elapsed = None;
         self.footer_message = None;
+    }
+
+    fn reset_to_idle(&mut self) {
+        self.run_state = RunState::Idle;
+        self.scanned = 0;
+        self.queued = 0;
+        self.done = 0;
+        self.failed = 0;
+        self.in_flight.clear();
+        self.recent.clear();
+        self.llm_time_total = Duration::ZERO;
+        self.asset_time_total = Duration::ZERO;
+        self.run_started = None;
+        self.run_elapsed = None;
     }
 
     fn push_log(&mut self, row: LogRow) {
@@ -659,6 +672,57 @@ mod tests {
         assert_eq!(a.screen, Screen::Run);
         assert_eq!(a.config.run.workers, 3);
         assert_eq!(a.footer_message.as_deref(), Some("settings saved"));
+    }
+
+    #[test]
+    fn saving_from_paused_resets_run_telemetry_but_keeps_log() {
+        let mut a = app();
+        a.on_key(Key::Char('s'));
+        a.on_event(Event::PageLoaded {
+            scanned: 12,
+            queued: 7,
+        });
+        a.on_event(done("1"));
+        a.on_event(Event::AssetFailed {
+            id: "2".into(),
+            name: "2".into(),
+            error: "boom".into(),
+        });
+        a.on_event(Event::AssetStarted {
+            id: "3".into(),
+            name: "3".into(),
+        });
+        assert_eq!(a.on_key(Key::Char('p')), Some(Action::Send(Command::Pause)));
+        assert_eq!(a.run_state, RunState::Paused);
+        assert_eq!(a.log.len(), 2);
+        assert!(a.run_started.is_some());
+        assert_eq!(a.avg_llm(), Some(Duration::from_secs(3)));
+        assert_eq!(a.avg_total(), Some(Duration::from_secs(4)));
+        assert!(a.rate_per_min(Instant::now()).is_none());
+
+        a.on_key(Key::Char('c'));
+        a.settings.fields[crate::settings::WORKERS].value = "3".into();
+        let action = a.on_key(Key::CtrlS);
+        match action {
+            Some(Action::SaveConfig(cfg)) => assert_eq!(cfg.run.workers, 3),
+            other => panic!("{other:?}"),
+        }
+
+        assert_eq!(a.run_state, RunState::Idle);
+        assert_eq!(a.screen, Screen::Run);
+        assert_eq!((a.scanned, a.queued, a.done, a.failed), (0, 0, 0, 0));
+        assert!(a.in_flight.is_empty());
+        assert_eq!(a.log.len(), 2);
+        assert!(a.recent.is_empty());
+        assert_eq!(a.llm_time_total, Duration::ZERO);
+        assert_eq!(a.asset_time_total, Duration::ZERO);
+        assert_eq!(a.run_started, None);
+        assert_eq!(a.run_elapsed, None);
+        assert_eq!(a.progress_ratio(), 0.0);
+        assert_eq!(a.avg_llm(), None);
+        assert_eq!(a.avg_total(), None);
+        assert_eq!(a.rate_per_min(Instant::now()), None);
+        assert_eq!(a.eta(Instant::now()), None);
     }
 
     #[test]
