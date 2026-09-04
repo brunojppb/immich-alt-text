@@ -25,7 +25,7 @@ that this document does not name.
 | Write-back | Automatic. The TUI shows the last results in a log. No review step. |
 | Prompt | Built-in default, overridable in the config file. No prompt editor in the TUI. |
 | Config | TOML file plus a settings screen in the TUI. |
-| Failures | Retry transient errors 3 times with backoff, then mark the asset failed and continue. Auth and config errors stop the run. |
+| Failures | Retry transient errors 3 times with backoff (4 attempts in total), then mark the asset failed and continue. Auth and config errors stop the run. |
 | Keys | Start, pause, resume, quit, scroll the log, expand a log row, open settings. |
 | Architecture | One tokio runtime. The engine emits `Event`s over a channel. The UI sends `Command`s back. No shared mutable state between them. |
 
@@ -86,7 +86,7 @@ One binary crate, `immich-alt-text`, Rust 2021 edition.
 
 | Module | One job | Depends on |
 | --- | --- | --- |
-| `config` | Load, validate, save the TOML file. Default path from the XDG config dir. | `serde`, `toml`, `directories` |
+| `config` | Load, validate, save the TOML file. Default path from `$XDG_CONFIG_HOME` or `~/.config`. | `serde`, `toml` |
 | `immich` | Typed client: list image pages, fetch preview JPEG, update description, get version. | `reqwest`, `serde` |
 | `llm` | One function: JPEG bytes plus prompt in, description out. | `reqwest`, `base64` |
 | `engine` | The pipeline. Owns paging, the worker pool, retries. Emits `Event`s, accepts `Command`s. | `immich`, `llm`, `tokio` |
@@ -95,8 +95,8 @@ One binary crate, `immich-alt-text`, Rust 2021 edition.
 | `theme` | Named color constants and the mono fallback. | `ratatui` |
 | `main` | Terminal setup, tokio runtime, event loop, teardown. | all |
 
-Crates: `ratatui`, `crossterm`, `tokio`, `reqwest` (features `json`,
-`rustls-tls`), `serde`, `serde_json`, `toml`, `directories`, `base64`,
+Crates: `ratatui`, `tokio`, `reqwest` (feature `json`;
+`reqwest` uses rustls by default in 0.13), `serde`, `serde_json`, `toml`, `base64`, `chrono`,
 `thiserror`, `anyhow`, `tracing`, `tracing-appender`, `tokio-util` (for
 `CancellationToken`), `clap` (for `--config`).
 
@@ -145,9 +145,10 @@ when the channel is full, so memory stays flat for a large library. Emit
 Each HTTP call runs with a timeout. Immich calls use `immich.timeout_secs`.
 LLM calls use `llm.timeout_secs`.
 
-**Retries.** Each stage runs inside a retry wrapper. Attempts: `run.retries`,
-default 3. Backoff: 2s, 4s, 8s. Only `Transient` errors retry. After the last
-attempt, emit `AssetFailed` and continue with the next asset.
+**Retries.** Each stage runs inside a retry wrapper. `run.retries` is the number
+of retries after the first try, default 3, so up to 4 attempts. Backoff between
+attempts: 2s, 4s, 8s. Only `Transient` errors retry. After the last attempt,
+emit `AssetFailed` and continue with the next asset.
 
 **Error classes.**
 
@@ -201,8 +202,8 @@ Key handling, settings screen:
 | --- | --- |
 | `tab`, `shift-tab` | move focus between fields |
 | printable, backspace | edit the focused field |
-| `v` on the API key row | toggle key visibility |
-| `t` | test both connections, show results in the form |
+| `ctrl-r` | toggle API key visibility |
+| `ctrl-t` | test both connections, show results in the form |
 | `ctrl-s` | validate and save, then return to the run screen |
 | `esc` | discard edits and return |
 
@@ -248,16 +249,16 @@ bright values, one colored word for state.
 ```
 ╭─ settings ──────────────────────────────────────────────────╮
 │ immich url        https://photos.home.lan                    │
-│ immich api key    ••••••••••••••••••••••••••••••   [v show]  │
+│ immich api key    ••••••••••••••••••••••••••••••  ctrl-r show │
 │ llm base url      http://localhost:1234/v1                   │
 │ llm api key                                                   │
 │ llm model         gemma-3-12b-it                              │
 │ workers           1                                           │
 │ max tokens        200                                         │
 │                                                               │
-│ [t] test connections      immich ✓ v3.1.0     llm ✓ 200 OK   │
+│ ctrl-t test connections   immich ✓ v3.1.0     llm ✓ 200 OK   │
 │                                                               │
-│ ctrl-s save   t test   esc back                               │
+│ ctrl-s save   ctrl-t test   esc back                          │
 ╰───────────────────────────────────────────────────────────────╯
 ```
 
@@ -357,7 +358,7 @@ panic message prints.
 | `engine` | `wiremock` for both servers. (a) 3 assets, one with a description: exactly 2 LLM calls, 2 writes, expected event order. (b) LLM fails twice then succeeds: one `AssetDone`. (c) LLM fails 3 times: `AssetFailed`. (d) `Pause` mid-run: no new `AssetStarted` until `Resume`. (e) 401 from Immich: `Fatal`. |
 | `app` | Feed events, check counters, rate, ring buffer cap. Feed keys, check screen changes and that `p` does nothing when idle. |
 | `ui` | `insta` snapshots with `TestBackend` at 120x40, 80x24, 40x10. |
-| Manual | `just demo` runs the binary against a fake Immich and fake LLM so the TUI can be watched with no real library. |
+| Manual | `cargo run --example fake_servers` starts a fake Immich and a fake LLM and writes `target/demo-config.toml`. `cargo run -- --config target/demo-config.toml` then shows the TUI moving with no real library. |
 
 No test needs a real Immich or a real model.
 
