@@ -1055,9 +1055,10 @@ async fn fatal_cancellation_wins_over_saturated_non_terminal_events() {
     let handle = engine::spawn_with(config_with_run(&immich, &llm, 1, 3, 1), tx, fast()).unwrap();
     handle.send(Command::Start).await;
     fatal_response.notified().await;
-    for _ in 0..8 {
-        tokio::task::yield_now().await;
-    }
+    // The responder notification fires while wiremock is constructing the response,
+    // before reqwest necessarily observes the 401 and cancels the run. Keep the event
+    // channel saturated long enough for that local response to cross the boundary.
+    tokio::time::sleep(Duration::from_millis(100)).await;
 
     let first = next_event(&mut rx).await;
     assert_eq!(
