@@ -121,6 +121,7 @@ struct Engine {
 /// One run: discovery plus workers. Dropped when the next run starts.
 struct Run {
     token: CancellationToken,
+    terminal_cancel: CancellationToken,
     /// Cleared just before `RunFinished` so a new `Start` is accepted at once.
     active: Arc<AtomicBool>,
     pause_tx: watch::Sender<bool>,
@@ -175,6 +176,7 @@ impl From<LlmError> for StageError {
 impl Engine {
     async fn control_loop(self: Arc<Self>, mut cmd_rx: mpsc::Receiver<ControlMessage>) {
         let mut run: Option<Run> = None;
+        let mut retired_runs = Vec::new();
 
         loop {
             tokio::select! {
@@ -188,11 +190,14 @@ impl Engine {
                             });
                             if !busy {
                                 if let Some(run) = run.take() {
-                                    let _ = run.task.await;
+                                    run.token.cancel();
+                                    run.terminal_cancel.cancel();
+                                    retired_runs.push(run.task);
                                 }
                                 run = Some(self.clone().start_run());
                             }
                             let _ = ack.send(());
+                            Self::reap_finished(&mut retired_runs).await;
                         }
                         Command::Pause => {
                             if let Some(run) = run.as_ref() {
@@ -219,17 +224,41 @@ impl Engine {
         }
 
         if let Some(run) = run {
+            run.token.cancel();
+            run.terminal_cancel.cancel();
             let _ = run.task.await;
+        }
+        for task in retired_runs {
+            let _ = task.await;
+        }
+    }
+
+    async fn reap_finished(tasks: &mut Vec<JoinHandle<()>>) {
+        let mut index = 0;
+        while index < tasks.len() {
+            if tasks[index].is_finished() {
+                let task = tasks.swap_remove(index);
+                let _ = task.await;
+            } else {
+                index += 1;
+            }
         }
     }
 
     fn start_run(self: Arc<Self>) -> Run {
         let token = self.cancel.child_token();
+        let terminal_cancel = CancellationToken::new();
         let (pause_tx, pause_rx) = watch::channel(false);
         let active = Arc::new(AtomicBool::new(true));
-        let task = tokio::spawn(self.run(token.clone(), pause_rx, active.clone()));
+        let task = tokio::spawn(self.run(
+            token.clone(),
+            terminal_cancel.clone(),
+            pause_rx,
+            active.clone(),
+        ));
         Run {
             token,
+            terminal_cancel,
             active,
             pause_tx,
             task,
@@ -239,6 +268,7 @@ impl Engine {
     async fn run(
         self: Arc<Self>,
         token: CancellationToken,
+        terminal_cancel: CancellationToken,
         pause_rx: watch::Receiver<bool>,
         active: Arc<AtomicBool>,
     ) {
@@ -253,6 +283,7 @@ impl Engine {
         for _ in 0..workers {
             handles.push(tokio::spawn(self.clone().worker(
                 token.clone(),
+                terminal_cancel.clone(),
                 pause_rx.clone(),
                 asset_rx.clone(),
                 done.clone(),
@@ -260,7 +291,9 @@ impl Engine {
             )));
         }
 
-        self.clone().discover(token.clone(), asset_tx).await;
+        self.clone()
+            .discover(token.clone(), terminal_cancel, asset_tx)
+            .await;
 
         for handle in handles {
             let _ = handle.await;
@@ -283,7 +316,12 @@ impl Engine {
 
     /// Pages through Immich and queues assets that need a description.
     /// Dropping `asset_tx` at the end tells the workers to stop.
-    async fn discover(self: Arc<Self>, token: CancellationToken, asset_tx: mpsc::Sender<Asset>) {
+    async fn discover(
+        self: Arc<Self>,
+        token: CancellationToken,
+        terminal_cancel: CancellationToken,
+        asset_tx: mpsc::Sender<Asset>,
+    ) {
         let mut page = 1u32;
         let mut scanned = 0u64;
         let mut queued = 0u64;
@@ -297,7 +335,8 @@ impl Engine {
             let page_data = match result {
                 Ok(page_data) => page_data,
                 Err(error) => {
-                    self.fail_run(&token, error.to_string()).await;
+                    self.fail_run(&token, &terminal_cancel, error.to_string())
+                        .await;
                     return;
                 }
             };
@@ -343,6 +382,7 @@ impl Engine {
     async fn worker(
         self: Arc<Self>,
         token: CancellationToken,
+        terminal_cancel: CancellationToken,
         mut pause_rx: watch::Receiver<bool>,
         asset_rx: Arc<Mutex<mpsc::Receiver<Asset>>>,
         done: Arc<AtomicU64>,
@@ -399,7 +439,7 @@ impl Engine {
                 drop(handoff_guard);
             }
 
-            match self.process(&token, &asset).await {
+            match self.process(&token, &terminal_cancel, &asset).await {
                 Outcome::Done => {
                     done.fetch_add(1, Ordering::Relaxed);
                 }
@@ -411,7 +451,12 @@ impl Engine {
         }
     }
 
-    async fn process(&self, token: &CancellationToken, asset: &Asset) -> Outcome {
+    async fn process(
+        &self,
+        token: &CancellationToken,
+        terminal_cancel: &CancellationToken,
+        asset: &Asset,
+    ) -> Outcome {
         if token.is_cancelled() {
             return Outcome::Cancelled;
         }
@@ -428,7 +473,11 @@ impl Engine {
             .await;
         let jpeg = match jpeg {
             Ok(jpeg) => jpeg,
-            Err(error) => return self.fail_asset(token, id, name, error).await,
+            Err(error) => {
+                return self
+                    .fail_asset(token, terminal_cancel, id, name, error)
+                    .await
+            }
         };
 
         if !self.stage(token, &id, Stage::CallingLlm).await {
@@ -442,7 +491,11 @@ impl Engine {
             .await;
         let text = match text {
             Ok(text) => text,
-            Err(error) => return self.fail_asset(token, id, name, error).await,
+            Err(error) => {
+                return self
+                    .fail_asset(token, terminal_cancel, id, name, error)
+                    .await
+            }
         };
         let llm_took = llm_started.elapsed();
 
@@ -453,7 +506,9 @@ impl Engine {
             .retry(token, false, || self.immich.set_description(&id, &text))
             .await
         {
-            return self.fail_asset(token, id, name, error).await;
+            return self
+                .fail_asset(token, terminal_cancel, id, name, error)
+                .await;
         }
 
         if token.is_cancelled() {
@@ -532,6 +587,7 @@ impl Engine {
     async fn fail_asset(
         &self,
         token: &CancellationToken,
+        terminal_cancel: &CancellationToken,
         id: String,
         name: String,
         error: StageError,
@@ -542,7 +598,7 @@ impl Engine {
 
         match error {
             StageError::Fatal(message) => {
-                self.fail_run(token, message).await;
+                self.fail_run(token, terminal_cancel, message).await;
                 Outcome::Cancelled
             }
             StageError::Cancelled => Outcome::Cancelled,
@@ -563,14 +619,21 @@ impl Engine {
         }
     }
 
-    async fn fail_run(&self, token: &CancellationToken, message: String) {
+    async fn fail_run(
+        &self,
+        token: &CancellationToken,
+        terminal_cancel: &CancellationToken,
+        message: String,
+    ) {
         if token.is_cancelled() {
             return;
         }
 
         tracing::error!(error = %message, "run stopped");
         token.cancel();
-        self.emit(Event::Fatal { error: message }).await;
+        let _ = self
+            .emit_terminal(terminal_cancel, Event::Fatal { error: message })
+            .await;
     }
 
     async fn stage(&self, token: &CancellationToken, id: &str, stage: Stage) -> bool {
@@ -603,8 +666,12 @@ impl Engine {
         Ok(())
     }
 
-    async fn emit(&self, event: Event) {
-        let _ = self.events.send(event).await;
+    async fn emit_terminal(&self, cancel: &CancellationToken, event: Event) -> bool {
+        tokio::select! {
+            biased;
+            _ = cancel.cancelled() => false,
+            result = self.events.send(event) => result.is_ok(),
+        }
     }
 
     async fn emit_run(&self, token: &CancellationToken, event: Event) -> bool {

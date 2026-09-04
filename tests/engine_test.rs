@@ -1077,3 +1077,40 @@ async fn fatal_cancellation_wins_over_saturated_non_terminal_events() {
     .await;
     handle.shutdown(Duration::from_secs(1)).await;
 }
+
+#[tokio::test]
+async fn restart_start_is_live_when_previous_run_finished_on_saturated_events() {
+    let immich = MockServer::start().await;
+    let llm = MockServer::start().await;
+    mount_immich_basics(&immich, &[]).await;
+
+    let (tx, _rx) = mpsc::channel(3);
+    let event_channel = tx.clone();
+    tx.send(Event::Fatal {
+        error: "test filler".into(),
+    })
+    .await
+    .unwrap();
+
+    let handle = engine::spawn_with(config(&immich, &llm), tx, fast()).unwrap();
+    handle.send(Command::Start).await;
+    wait_for_request_count(&immich, 1).await;
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while event_channel.capacity() != 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("previous run did not saturate the event channel");
+
+    for _ in 0..8 {
+        tokio::task::yield_now().await;
+    }
+
+    tokio::time::timeout(Duration::from_millis(200), handle.send(Command::Start))
+        .await
+        .expect("restart Start blocked on the previous run's event delivery");
+    wait_for_request_count(&immich, 2).await;
+
+    handle.shutdown(Duration::from_secs(1)).await;
+}
