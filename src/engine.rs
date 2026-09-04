@@ -54,9 +54,11 @@ impl EngineHandle {
                 let _ = self.pause_tx.send(true);
                 let guard = self.handoff.lock().await;
                 drop(guard);
+                return;
             }
             Command::Resume => {
                 let _ = self.pause_tx.send(false);
+                return;
             }
             Command::Start | Command::Quit => {}
         }
@@ -197,12 +199,7 @@ impl Engine {
                                 run = Some(self.clone().start_run());
                             }
                         }
-                        Command::Pause => {
-                            let _ = self.pause_tx.send(true);
-                        }
-                        Command::Resume => {
-                            let _ = self.pause_tx.send(false);
-                        }
+                        Command::Pause | Command::Resume => {}
                         Command::Quit => {
                             self.cancel.cancel();
                             break;
@@ -219,6 +216,7 @@ impl Engine {
 
     fn start_run(self: Arc<Self>) -> Run {
         let token = self.cancel.child_token();
+        let _previous = self.pause_tx.send_replace(false);
         let pause_rx = self.pause_tx.subscribe();
         let active = Arc::new(AtomicBool::new(true));
         let task = tokio::spawn(self.run(token.clone(), pause_rx, active.clone()));
@@ -261,12 +259,16 @@ impl Engine {
 
         active.store(false, Ordering::Release);
         if !token.is_cancelled() {
-            self.emit(Event::RunFinished {
-                done: done.load(Ordering::Relaxed),
-                failed: failed.load(Ordering::Relaxed),
-                elapsed: started.elapsed(),
-            })
-            .await;
+            let _ = self
+                .emit_run(
+                    &token,
+                    Event::RunFinished {
+                        done: done.load(Ordering::Relaxed),
+                        failed: failed.load(Ordering::Relaxed),
+                        elapsed: started.elapsed(),
+                    },
+                )
+                .await;
         }
     }
 
@@ -298,7 +300,9 @@ impl Engine {
                 .filter(|asset| asset.needs_description())
                 .collect();
             queued += wanted.len() as u64;
-            self.emit(Event::PageLoaded { scanned, queued }).await;
+            let _ = self
+                .emit_run(&token, Event::PageLoaded { scanned, queued })
+                .await;
 
             for asset in wanted {
                 tokio::select! {
@@ -317,10 +321,14 @@ impl Engine {
             }
         }
 
-        self.emit(Event::DiscoveryDone {
-            total_queued: queued,
-        })
-        .await;
+        let _ = self
+            .emit_run(
+                &token,
+                Event::DiscoveryDone {
+                    total_queued: queued,
+                },
+            )
+            .await;
     }
 
     async fn worker(
@@ -366,11 +374,19 @@ impl Engine {
                     pending = Some(asset);
                     continue;
                 }
-                self.emit(Event::AssetStarted {
-                    id: asset.id.clone(),
-                    name: asset.name.clone(),
-                })
-                .await;
+                if !self
+                    .emit_run(
+                        &token,
+                        Event::AssetStarted {
+                            id: asset.id.clone(),
+                            name: asset.name.clone(),
+                        },
+                    )
+                    .await
+                {
+                    drop(handoff_guard);
+                    return;
+                }
                 drop(handoff_guard);
             }
 
@@ -395,7 +411,9 @@ impl Engine {
         let id = asset.id.clone();
         let name = asset.name.clone();
 
-        self.stage(&id, Stage::Fetching).await;
+        if !self.stage(token, &id, Stage::Fetching).await {
+            return Outcome::Cancelled;
+        }
         let jpeg = self
             .retry(token, true, || self.immich.preview_jpeg(&id))
             .await;
@@ -404,7 +422,9 @@ impl Engine {
             Err(error) => return self.fail_asset(token, id, name, error).await,
         };
 
-        self.stage(&id, Stage::CallingLlm).await;
+        if !self.stage(token, &id, Stage::CallingLlm).await {
+            return Outcome::Cancelled;
+        }
         let llm_started = Instant::now();
         let text = self
             .retry(token, true, || {
@@ -417,7 +437,9 @@ impl Engine {
         };
         let llm_took = llm_started.elapsed();
 
-        self.stage(&id, Stage::Writing).await;
+        if !self.stage(token, &id, Stage::Writing).await {
+            return Outcome::Cancelled;
+        }
         if let Err(error) = self
             .retry(token, false, || self.immich.set_description(&id, &text))
             .await
@@ -429,14 +451,18 @@ impl Engine {
             return Outcome::Cancelled;
         }
 
-        self.emit(Event::AssetDone {
-            id,
-            name,
-            description: text,
-            took: started.elapsed(),
-            llm_took,
-        })
-        .await;
+        let _ = self
+            .emit_run(
+                token,
+                Event::AssetDone {
+                    id,
+                    name,
+                    description: text,
+                    took: started.elapsed(),
+                    llm_took,
+                },
+            )
+            .await;
         Outcome::Done
     }
 
@@ -513,12 +539,16 @@ impl Engine {
             StageError::Cancelled => Outcome::Cancelled,
             other => {
                 tracing::warn!(%id, %name, error = %other, "asset failed");
-                self.emit(Event::AssetFailed {
-                    id,
-                    name,
-                    error: other.to_string(),
-                })
-                .await;
+                let _ = self
+                    .emit_run(
+                        token,
+                        Event::AssetFailed {
+                            id,
+                            name,
+                            error: other.to_string(),
+                        },
+                    )
+                    .await;
                 Outcome::Failed
             }
         }
@@ -534,12 +564,15 @@ impl Engine {
         token.cancel();
     }
 
-    async fn stage(&self, id: &str, stage: Stage) {
-        self.emit(Event::AssetStage {
-            id: id.to_string(),
-            stage,
-        })
-        .await;
+    async fn stage(&self, token: &CancellationToken, id: &str, stage: Stage) -> bool {
+        self.emit_run(
+            token,
+            Event::AssetStage {
+                id: id.to_string(),
+                stage,
+            },
+        )
+        .await
     }
 
     async fn wait_until_resumed(
@@ -563,5 +596,16 @@ impl Engine {
 
     async fn emit(&self, event: Event) {
         let _ = self.events.send(event).await;
+    }
+
+    async fn emit_run(&self, token: &CancellationToken, event: Event) -> bool {
+        if token.is_cancelled() {
+            return false;
+        }
+
+        tokio::select! {
+            _ = token.cancelled() => false,
+            result = self.events.send(event) => result.is_ok(),
+        }
     }
 }

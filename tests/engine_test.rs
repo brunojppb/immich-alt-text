@@ -141,6 +141,20 @@ async fn assert_no_matching_event(
     if let Ok(()) = wait {}
 }
 
+async fn wait_for_request_count(server: &MockServer, expected: usize) {
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            let requests = server.received_requests().await.unwrap_or_default();
+            if requests.len() >= expected {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("timed out waiting for requests");
+}
+
 fn drain_ready_events(rx: &mut mpsc::Receiver<Event>) -> Vec<Event> {
     let mut events = Vec::new();
     while let Ok(event) = rx.try_recv() {
@@ -170,6 +184,19 @@ async fn collect_until(
             return seen;
         }
     }
+}
+
+async fn start_until_first_event(
+    handle: &engine::EngineHandle,
+    rx: &mut mpsc::Receiver<Event>,
+) -> Event {
+    for _ in 0..3 {
+        handle.send(Command::Start).await;
+        if let Ok(Some(event)) = tokio::time::timeout(Duration::from_millis(200), rx.recv()).await {
+            return event;
+        }
+    }
+    panic!("start did not begin a new run");
 }
 
 #[tokio::test]
@@ -621,16 +648,7 @@ async fn fatal_cancellation_stops_other_workers_in_writing_without_late_events()
     assert!(events
         .iter()
         .any(|event| matches!(event, Event::Fatal { error } if error.contains("401"))));
-    assert_no_matching_event(&mut rx, Duration::from_millis(350), |event| {
-        matches!(
-            event,
-            Event::AssetDone { .. }
-                | Event::AssetFailed { .. }
-                | Event::RunFinished { .. }
-                | Event::Fatal { .. }
-        )
-    })
-    .await;
+    assert_no_matching_event(&mut rx, Duration::from_millis(350), |_| true).await;
     handle.shutdown(Duration::from_secs(1)).await;
 }
 
@@ -671,13 +689,7 @@ async fn quit_command_stops_writing_retries_without_late_events() {
     tokio::time::timeout(Duration::from_millis(500), async {
         while let Some(event) = rx.recv().await {
             assert!(
-                !matches!(
-                    event,
-                    Event::AssetDone { .. }
-                        | Event::AssetFailed { .. }
-                        | Event::RunFinished { .. }
-                        | Event::Fatal { .. }
-                ),
+                !matches!(event, _),
                 "unexpected event after quit: {event:?}"
             );
         }
@@ -839,5 +851,100 @@ async fn discovery_follows_next_page_and_reports_cumulative_counts() {
             ..
         }
     ));
+    handle.shutdown(Duration::from_secs(1)).await;
+}
+
+#[tokio::test]
+async fn start_after_paused_fatal_run_does_not_inherit_pause_state() {
+    let immich = MockServer::start().await;
+    let llm = MockServer::start().await;
+    mount_immich_basics(&immich, &[("a1", "IMG_1.HEIC", None)]).await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(ResponseTemplate::new(401))
+        .up_to_n_times(1)
+        .expect(1)
+        .mount(&llm)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(completion("ok")))
+        .expect(1)
+        .mount(&llm)
+        .await;
+    Mock::given(method("PUT"))
+        .and(path("/api/assets/a1"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(1)
+        .mount(&immich)
+        .await;
+
+    let (tx, mut rx) = mpsc::channel(256);
+    let handle = engine::spawn_with(config(&immich, &llm), tx, fast()).unwrap();
+    handle.send(Command::Start).await;
+    collect_until(&mut rx, |event| matches!(event, Event::AssetStarted { .. })).await;
+    handle.send(Command::Pause).await;
+    collect_until(&mut rx, |event| matches!(event, Event::Fatal { .. })).await;
+    assert_no_matching_event(&mut rx, Duration::from_millis(100), |_| true).await;
+
+    let first = start_until_first_event(&handle, &mut rx).await;
+    let mut events = vec![first];
+    let more = tokio::time::timeout(Duration::from_secs(1), async {
+        collect_until(&mut rx, |event| matches!(event, Event::RunFinished { .. })).await
+    })
+    .await
+    .unwrap_or_else(|_| panic!("timed out after first restart event: {:?}", events[0]));
+    events.extend(more);
+    assert!(events
+        .iter()
+        .any(|event| matches!(event, Event::AssetStarted { name, .. } if name == "IMG_1.HEIC")));
+    assert!(matches!(
+        events.last().unwrap(),
+        Event::RunFinished {
+            done: 1,
+            failed: 0,
+            ..
+        }
+    ));
+    handle.shutdown(Duration::from_secs(1)).await;
+}
+
+#[tokio::test]
+async fn quit_drops_blocked_non_terminal_events_after_cancellation() {
+    let immich = MockServer::start().await;
+    let llm = MockServer::start().await;
+    mount_immich_basics(&immich, &[("a1", "IMG_1.HEIC", None)]).await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(completion("ok")))
+        .expect(1)
+        .mount(&llm)
+        .await;
+    Mock::given(method("PUT"))
+        .and(path("/api/assets/a1"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(0)
+        .mount(&immich)
+        .await;
+
+    let (tx, mut rx) = mpsc::channel(1);
+    let handle = engine::spawn_with(config(&immich, &llm), tx, fast()).unwrap();
+    handle.send(Command::Start).await;
+    collect_until(&mut rx, |event| {
+        matches!(
+            event,
+            Event::AssetStage { id, stage } if id == "a1" && *stage == Stage::Fetching
+        )
+    })
+    .await;
+    wait_for_request_count(&llm, 1).await;
+
+    handle.send(Command::Quit).await;
+    let buffered = next_event(&mut rx).await;
+    assert!(matches!(
+        buffered,
+        Event::AssetStage { id, stage } if id == "a1" && stage == Stage::CallingLlm
+    ));
+    assert_no_matching_event(&mut rx, Duration::from_millis(300), |_| true).await;
     handle.shutdown(Duration::from_secs(1)).await;
 }
