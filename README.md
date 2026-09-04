@@ -109,4 +109,24 @@ cargo test
 cargo clippy --all-targets -- -D warnings
 ```
 
+### Pull request build artifacts
+
+Every pull request opened, synchronized, or reopened builds three release
+binaries. Each target-specific artifact is a `.tar.gz` archive containing its
+binary. Open the workflow run's artifacts in GitHub Actions to download either
+one of these target-specific archives or the combined `immich-alt-text-builds`
+bundle:
+
+- `immich-alt-text-x86_64-unknown-linux-musl` — portable Linux x86_64
+- `immich-alt-text-aarch64-unknown-linux-musl` — portable Linux ARM64
+- `immich-alt-text-aarch64-apple-darwin` — Apple Silicon macOS
+
+The combined `immich-alt-text-builds` artifact contains all three target
+archives. These PR artifacts are retained for 14 days. To download one, open
+the pull request's **Checks** tab, select the **Build artifacts** workflow run,
+and choose an artifact from the **Artifacts** section.
+
+These are unsigned development artifacts. Tag-triggered GitHub Releases,
+signing, and checksums are intentionally deferred.
+
 Design: `docs/design.md`. Plan: `docs/plans/2026-09-04-immich-alt-text.md`.
