@@ -196,14 +196,18 @@ pub fn save(path: &Path, config: &Config) -> Result<(), ConfigError> {
 #[cfg(unix)]
 fn create_owner_only_file(path: &Path) -> std::io::Result<std::fs::File> {
     use std::fs::OpenOptions;
-    use std::os::unix::fs::OpenOptionsExt;
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
-    OpenOptions::new()
+    let file = OpenOptions::new()
         .create(true)
         .truncate(true)
         .write(true)
         .mode(0o600)
-        .open(path)
+        .open(path)?;
+
+    file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+
+    Ok(file)
 }
 
 fn invalid(message: impl Into<String>) -> ConfigError {
@@ -308,6 +312,22 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
         save(&path, &full()).unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn save_tightens_existing_file_permissions_to_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "old").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        save(&path, &full()).unwrap();
+
         let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600);
     }
