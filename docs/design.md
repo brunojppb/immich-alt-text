@@ -116,14 +116,14 @@ enum Event {
     AssetFailed { id: String, name: String, error: String },
     RunFinished { done: u64, failed: u64, elapsed: Duration },
     Fatal { error: String },
-    ConnectionTest { immich: Result<String, String>, llm: Result<String, String> },
+    ConnectionTest { id: u64, immich: Result<String, String>, llm: Result<String, String> },
 }
 ```
 
-`engine` sends `Event` on a `tokio::sync::mpsc` channel. `main` forwards each
-`Event` to `app.on_event`. `app.on_key` may return a `Command`, which `main`
-sends to the engine. The engine never sees the UI. The UI never makes HTTP
-calls.
+Each engine runtime owns its `tokio::sync::mpsc` event receiver. `main` forwards
+events from only the active runtime to `app.on_event`; replacing a runtime drops
+its queued events. `app.on_key` may return a `Command`, which `main` sends to the
+engine. The engine never sees the UI. The UI never makes HTTP calls.
 
 ## 6. Engine behavior
 
@@ -207,7 +207,9 @@ Key handling, settings screen:
 | `ctrl-s` | validate and save, then return to the run screen |
 | `esc` | discard edits and return |
 
-Saving while a run is active is refused with a footer message. Pause first.
+Saving while a run is running is refused with a footer message. Pause first.
+Replacement waits for any in-flight Immich write to receive a response or hit
+its configured HTTP timeout before the new engine becomes active.
 
 ## 8. UI
 
@@ -228,7 +230,7 @@ bright values, one colored word for state.
 │ ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────╯ │
 │ ╭─ log ────────────────────────────────────────────────────────────────────────────────────────────────────╮ │
 │ │ 18:42:11  ✓ IMG_4470.HEIC  4.3 s  A golden retriever sits on a wooden dock at sunset, looking toward…    │ │
-│ │ 18:42:02  ✗ IMG_4468.HEIC        llm: timeout after 120 s (3 tries)                                      │ │
+│ │ 18:42:02  ✗ IMG_4468.HEIC        llm: timeout after 120 s (3 retries, 4 attempts)                    │ │
 │ ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────╯ │
 │  s start   p pause   ↑↓ scroll log   enter expand   c settings   q quit                                        │
 ╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
@@ -266,9 +268,10 @@ First launch with no config file opens this screen with the LM Studio defaults
 filled in. Prompt, timeouts, retries, and page size are file-only.
 
 The connection test calls `GET /server/version` on Immich and
-`GET {base_url}/models` on the LLM. It runs on the tokio runtime and reports
-back through the same `Event` channel with a `Event::ConnectionTest` variant
-carrying the two results.
+`GET {base_url}/models` on the LLM. It runs on the tokio runtime and reports on
+a separate channel with an `Event::ConnectionTest` variant carrying a request
+ID and both results. Starting a newer test cancels the old task, and the app
+ignores a stale result that was already queued.
 
 ### Small terminals
 
@@ -334,14 +337,19 @@ page_size = 1000
 theme = "btop"
 ```
 
-Validation: both URLs parse and use `http` or `https`. `workers >= 1`.
-`page_size` between 1 and 1000. `retries >= 0`. `model` not empty.
+Validation: both URLs parse and use `http` or `https`. `workers` is between
+1 and 64. `page_size` is between 1 and 1000. `retries` is at most 10. `model`
+is not empty.
 `immich.api_key` not empty.
+
+Saving stages a mode-0600 temporary file in the destination directory, flushes
+and syncs it, then atomically renames it over the previous config.
 
 ## 10. Logging and shutdown
 
-`tracing` writes to `~/.local/state/immich-alt-text/debug.log` with daily
-rotation. Level from `RUST_LOG`, default `info`. Every HTTP call logs method,
+`tracing` writes UTC daily files named
+`~/.local/state/immich-alt-text/debug.log.YYYY-MM-DD`. Level from `RUST_LOG`,
+default `info`. Every HTTP call logs method,
 path, status, and duration. Bodies and keys are never logged.
 
 `q` and `ctrl-c` cancel the engine, wait up to 5 seconds for in-flight writes,

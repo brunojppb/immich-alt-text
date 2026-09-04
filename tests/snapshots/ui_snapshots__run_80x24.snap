@@ -1,0 +1,28 @@
+---
+source: tests/ui_snapshots.rs
+expression: terminal.backend()
+---
+"╭ immich-alt-text ─ photos.home.lan ─ gemma-3-12b-it @ localhost:1234  RUNNING ╮"
+"│╭ progress ───────────────────────────╮╭ counters ───────────────────────────╮│"
+"││█████████░░░░░░░░░░░░░ 1 287 / 3 102 ││scanned    14 920   done        1 284││"
+"││el 01:42:17 rt 12.6/m eta 02:24      ││queued      3 102   failed          3││"
+"││                                     ││avg llm     4.1 s   avg total   4.7 s││"
+"│╰─────────────────────────────────────╯╰─────────────────────────────────────╯│"
+"│╭ in flight ─────────────────────────────────────────────────────────────────╮│"
+"││● IMG_4471.HEIC       calling llm…  3.2 s                                   ││"
+"│╰────────────────────────────────────────────────────────────────────────────╯│"
+"│╭ log ───────────────────────────────────────────────────────────────────────╮│"
+"││18:42:11  ✓ IMG_4470.HEIC      4.3 s  A golden retriever sits on a wooden d…││"
+"││18:42:07  ✓ IMG_4469.HEIC      3.9 s  Two children build a sandcastle on a …││"
+"││18:42:02  ✗ IMG_4468.HEIC             llm: timeout after 120 s (4 tries)    ││"
+"││18:41:58  ✓ IMG_4467.HEIC      4.0 s  A plate of pasta with tomato sauce an…││"
+"││                                                                            ││"
+"││                                                                            ││"
+"││                                                                            ││"
+"││                                                                            ││"
+"││                                                                            ││"
+"││                                                                            ││"
+"││                                                                            ││"
+"│╰────────────────────────────────────────────────────────────────────────────╯│"
+"│ s start    p pause    ↑↓ scroll log    enter expand    c settings    q quit  │"
+"╰──────────────────────────────────────────────────────────────────────────────╯"

@@ -1,0 +1,28 @@
+---
+source: tests/ui_snapshots.rs
+expression: terminal.backend()
+---
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+" ╭ settings ──────────────────────────────────────────────────────────────────╮ "
+" │  immich url       https://photos.home.lan                                  │ "
+" │  immich api key   ••••••••••                                   ctrl-r show │ "
+" │▸ llm base url     http://localhost:1234/v1▏                                │ "
+" │  llm api key                                                   ctrl-r show │ "
+" │  llm model        gemma-3-12b-it                                           │ "
+" │  workers          1                                                        │ "
+" │  max tokens       200                                                      │ "
+" │                                                                            │ "
+" │  ctrl-t test connections   immich ✓ v3.1.0   llm ✗ HTTP 401 Unauthorized   │ "
+" │                                                                            │ "
+" │                                                                            │ "
+" │                                                                            │ "
+" │ ctrl-s save    ctrl-t test    esc back                                     │ "
+" ╰────────────────────────────────────────────────────────────────────────────╯ "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "

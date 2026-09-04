@@ -6,13 +6,13 @@
 
 **Architecture:** One tokio runtime. An `engine` task pages through Immich, runs a worker pool, and emits `Event`s over a channel. A pure `app` struct consumes `Event`s and `Key`s and returns `Action`s. `ui` draws `app` with Ratatui. `main` wires them and does all I/O that is not the engine's.
 
-**Tech Stack:** Rust 1.85+, ratatui 0.30, tokio 1, reqwest 0.13 (rustls by default), serde, toml 1, wiremock 0.6 and insta 1 for tests.
+**Tech Stack:** Rust 1.88+, ratatui 0.30, tokio 1, reqwest 0.13 (rustls by default), serde, toml 1, wiremock 0.6 and insta 1 for tests.
 
 **Spec:** `docs/design.md`. Read it before starting any task. The plan implements it and does not repeat every rationale.
 
 ## Global Constraints
 
-- Edition 2021, `rust-version = "1.85"`. Toolchain on the dev machine is 1.97.
+- Edition 2021, `rust-version = "1.88"`. Toolchain on the dev machine is 1.97.
 - Crate versions are pinned in Task 1's `Cargo.toml`. Do not add crates the plan does not name.
 - Every implementation task runs on its own git branch off `main`. Branch name: `task-N-<slug>`. Never commit code on `main`.
 - Commit messages use Conventional Commits: `feat:`, `fix:`, `test:`, `chore:`, `docs:`.
@@ -77,7 +77,7 @@ Replace `Cargo.toml` with:
 name = "immich-alt-text"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.85"
+rust-version = "1.88"
 description = "Describe Immich photos with a vision LLM from a terminal UI"
 license = "MIT"
 
@@ -170,6 +170,7 @@ pub enum Event {
     Fatal { error: String },
     /// Result of a settings-screen connection test. `Ok` holds a short status text.
     ConnectionTest {
+        id: u64,
         immich: Result<String, String>,
         llm: Result<String, String>,
     },
@@ -829,9 +830,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn connection_refused_is_transient() {
-        // Port 9 is the discard port. Nothing listens there on a dev machine.
-        let c = ImmichClient::new("http://127.0.0.1:9", "k", Duration::from_secs(2)).unwrap();
+    async fn request_timeout_is_transient() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/server/version"))
+            .respond_with(ResponseTemplate::new(200).set_delay(Duration::from_millis(200)))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let c = ImmichClient::new(&server.uri(), "k", Duration::from_millis(20)).unwrap();
         let err = c.version().await.unwrap_err();
         assert!(matches!(err, ImmichError::Transient(_)), "{err}");
     }
@@ -2760,7 +2767,7 @@ mod tests {
         a.on_key(Key::Char('c'));
         assert!(matches!(a.on_key(Key::CtrlT), Some(Action::TestConnections(_))));
         assert!(a.settings.testing);
-        a.on_event(Event::ConnectionTest { immich: Ok("v3.1.0".into()), llm: Err("HTTP 401".into()) });
+        a.on_event(Event::ConnectionTest { id: 1, immich: Ok("v3.1.0".into()), llm: Err("HTTP 401".into()) });
         assert!(!a.settings.testing);
         let (i, l) = a.settings.test_result.clone().unwrap();
         assert_eq!(i, Ok("v3.1.0".into()));
@@ -2946,7 +2953,7 @@ impl App {
                 self.in_flight.clear();
                 self.run_state = RunState::Error(error);
             }
-            Event::ConnectionTest { immich, llm } => {
+            Event::ConnectionTest { id, immich, llm } if id == self.connection_test_id => {
                 self.settings.testing = false;
                 self.settings.test_result = Some((immich, llm));
             }
@@ -4218,7 +4225,7 @@ async fn test_connections(cfg: Config, tx: mpsc::Sender<Event>) {
             .unwrap_or_else(|_| Err("timed out".to_string()))
     };
     let (immich, llm) = tokio::join!(timed(immich), timed(llm));
-    let _ = tx.send(Event::ConnectionTest { immich, llm }).await;
+    let _ = tx.send(Event::ConnectionTest { id, immich, llm }).await;
 }
 ```
 
@@ -4368,7 +4375,7 @@ start the run at any time. Hand-written descriptions are never touched.
 
 ## Requirements
 
-- Rust 1.85 or newer.
+- Rust 1.88 or newer.
 - An Immich server and an API key (Account settings → API keys).
 - A vision model behind an OpenAI-compatible API. Tested with LM Studio at
   `http://localhost:1234/v1`. Ollama, llama.cpp server, vLLM, OpenRouter, and OpenAI
@@ -4435,8 +4442,8 @@ settings screen covers the rest.
 
 ## Logs
 
-A debug log goes to `~/.local/state/immich-alt-text/debug.log`. Set `RUST_LOG=debug`
-for more detail. Request bodies and keys are never logged.
+UTC daily logs are named `~/.local/state/immich-alt-text/debug.log.YYYY-MM-DD`.
+Set `RUST_LOG=debug` for more detail. Request bodies and keys are never logged.
 
 ## Try it without a real library
 
