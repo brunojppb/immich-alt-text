@@ -93,3 +93,25 @@ jobs:
           binary="target/${{ matrix.target }}/release/immich-alt-text"
           test -x "$binary"
           file "$binary"
+
+      - name: Smoke test native binary
+        if: matrix.target == 'x86_64-unknown-linux-musl' || matrix.target == 'aarch64-apple-darwin'
+        shell: bash
+        run: target/${{ matrix.target }}/release/immich-alt-text --help
+
+      - name: Package target binary
+        shell: bash
+        run: |
+          binary="target/${{ matrix.target }}/release/immich-alt-text"
+          archive="$RUNNER_TEMP/${{ matrix.artifact }}.tar.gz"
+          tar -C "$(dirname "$binary")" -czf "$archive" "$(basename "$binary")"
+          tar -tzf "$archive"
+
+      - name: Upload target artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ runner.temp }}/${{ matrix.artifact }}.tar.gz
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
