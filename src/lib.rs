@@ -5,3 +5,5 @@ pub mod events;
 pub mod immich;
 pub mod llm;
 pub mod settings;
+pub mod theme;
+pub mod ui;
