@@ -133,7 +133,13 @@ impl ImmichClient {
                 description: asset.exif_info.and_then(|exif| exif.description),
             })
             .collect();
-        let next_page = parsed.assets.next_page.and_then(|page| page.parse().ok());
+        let next_page =
+            match parsed.assets.next_page {
+                Some(page) => Some(page.parse().map_err(|error| {
+                    ImmichError::Permanent(format!("bad nextPage value: {error}"))
+                })?),
+                None => None,
+            };
 
         Ok(Page { items, next_page })
     }
@@ -222,7 +228,7 @@ mod tests {
     use std::time::Duration;
 
     use serde_json::json;
-    use wiremock::matchers::{body_json, body_partial_json, header, method, path, query_param};
+    use wiremock::matchers::{body_json, header, method, path, query_param};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     async fn client(server: &MockServer) -> ImmichClient {
@@ -265,7 +271,7 @@ mod tests {
         Mock::given(method("POST"))
             .and(path("/api/search/metadata"))
             .and(header("x-api-key", "k"))
-            .and(body_partial_json(json!({
+            .and(body_json(json!({
                 "type": "IMAGE", "withExif": true, "size": 2, "page": 1, "order": "desc"
             })))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
@@ -291,6 +297,28 @@ mod tests {
         assert_eq!(page.items[0].name, "IMG_1.HEIC");
         assert!(page.items[0].needs_description());
         assert!(!page.items[1].needs_description());
+    }
+
+    #[tokio::test]
+    async fn list_images_invalid_next_page_is_permanent() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/search/metadata"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "assets": {
+                    "count": 1, "total": 2, "facets": [], "nextPage": "nope",
+                    "items": [
+                        { "id": "a1", "originalFileName": "x.jpg", "type": "IMAGE",
+                          "exifInfo": { "description": null } }
+                    ]
+                }
+            })))
+            .mount(&server)
+            .await;
+
+        let err = client(&server).await.list_images(1, 1).await.unwrap_err();
+        assert!(matches!(err, ImmichError::Permanent(_)), "{err}");
+        assert!(err.to_string().contains("nextPage"));
     }
 
     #[tokio::test]
@@ -375,6 +403,36 @@ mod tests {
         let err = client(&server).await.version().await.unwrap_err();
         assert!(matches!(err, ImmichError::Fatal(_)), "{err}");
         assert!(err.to_string().contains("401"));
+    }
+
+    #[tokio::test]
+    async fn forbidden_is_fatal() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/server/version"))
+            .respond_with(ResponseTemplate::new(403))
+            .mount(&server)
+            .await;
+        let err = client(&server).await.version().await.unwrap_err();
+        assert!(matches!(err, ImmichError::Fatal(_)), "{err}");
+        assert!(err.to_string().contains("403"));
+    }
+
+    #[tokio::test]
+    async fn rate_limited_is_transient() {
+        let server = MockServer::start().await;
+        Mock::given(method("PUT"))
+            .and(path("/api/assets/a1"))
+            .respond_with(ResponseTemplate::new(429))
+            .mount(&server)
+            .await;
+        let err = client(&server)
+            .await
+            .set_description("a1", "x")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ImmichError::Transient(_)), "{err}");
+        assert!(err.to_string().contains("429"));
     }
 
     #[tokio::test]
