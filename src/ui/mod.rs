@@ -5,6 +5,7 @@ mod settings;
 
 use std::time::{Duration, Instant};
 
+use ratatui::text::Span;
 use ratatui::Frame;
 
 use crate::app::{App, Screen};
@@ -44,14 +45,26 @@ pub fn fmt_count(n: u64) -> String {
 
 /// Cuts `s` to `max` cells and appends `…` when it had to cut.
 pub(crate) fn truncate(s: &str, max: usize) -> String {
-    let count = s.chars().count();
-    if count <= max {
+    if Span::raw(s).width() <= max {
         return s.to_string();
     }
     if max == 0 {
         return String::new();
     }
-    let mut out: String = s.chars().take(max - 1).collect();
+
+    let ellipsis_width = Span::raw("…").width();
+    let mut out = String::new();
+    let mut used = 0;
+    for c in s.chars() {
+        let mut encoded = [0; 4];
+        let text = c.encode_utf8(&mut encoded);
+        let width = Span::raw(&*text).width();
+        if used + width + ellipsis_width > max {
+            break;
+        }
+        out.push(c);
+        used += width;
+    }
     out.push('…');
     out
 }
@@ -72,5 +85,12 @@ mod tests {
         assert_eq!(truncate("hello", 5), "hello");
         assert_eq!(truncate("hello world", 5), "hell…");
         assert_eq!(truncate("x", 0), "");
+    }
+
+    #[test]
+    fn truncate_counts_common_wide_unicode_cells() {
+        assert_eq!(truncate("ab界cd", 4), "ab…");
+        assert_eq!(truncate("界ab", 3), "界…");
+        assert_eq!(truncate("界a", 3), "界a");
     }
 }

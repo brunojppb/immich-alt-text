@@ -27,8 +27,8 @@ pub fn render(frame: &mut Frame, app: &App, now: Instant, theme: &Theme) {
         return;
     }
 
-    let stacked = inner.width < 80;
-    let show_in_flight = area.height > 24;
+    let stacked = area.width < 80;
+    let show_in_flight = area.height >= 24;
     let top_height = if stacked { 9 } else { 5 };
     let in_flight_height = if show_in_flight {
         app.config.run.workers.max(1) as u16 + 2
@@ -48,8 +48,11 @@ pub fn render(frame: &mut Frame, app: &App, now: Instant, theme: &Theme) {
         render_progress(frame, p, app, now, theme);
         render_counters(frame, c, app, theme);
     } else {
-        let [p, c] =
-            Layout::horizontal([Constraint::Percentage(55), Constraint::Percentage(45)]).areas(top);
+        let [p, c] = if area.width < 100 {
+            Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)]).areas(top)
+        } else {
+            Layout::horizontal([Constraint::Percentage(55), Constraint::Percentage(45)]).areas(top)
+        };
         render_progress(frame, p, app, now, theme);
         render_counters(frame, c, app, theme);
     }
@@ -126,23 +129,47 @@ fn render_progress(frame: &mut Frame, area: Rect, app: &App, now: Instant, theme
     let bar_width = (inner.width as usize).saturating_sub(counts.chars().count() + 1);
     let mut line1 = bar(bar_width, app.progress_ratio(), theme);
     line1.push(Span::styled(counts, theme.value));
-    let rate = app
-        .rate_per_min(now)
-        .map(|r| format!("{r:.1}/min"))
-        .unwrap_or_else(|| "--".into());
-    let eta = app
-        .eta(now)
-        .map(fmt_clock)
-        .unwrap_or_else(|| "--:--:--".into());
-    let line2 = Line::from(vec![
-        Span::styled("elapsed ", theme.label),
-        Span::styled(fmt_clock(app.elapsed(now)), theme.value),
-        Span::styled("   rate ", theme.label),
-        Span::styled(rate, theme.value),
-        Span::styled("   eta ", theme.label),
-        Span::styled(eta, theme.value),
-    ]);
+    let line2 = if inner.width < 43 {
+        let rate = app
+            .rate_per_min(now)
+            .map(|r| format!("{r:.1}/m"))
+            .unwrap_or_else(|| "--/m".into());
+        let eta = app
+            .eta(now)
+            .map(fmt_eta_compact)
+            .unwrap_or_else(|| "--:--".into());
+        Line::from(vec![
+            Span::styled("el ", theme.label),
+            Span::styled(fmt_clock(app.elapsed(now)), theme.value),
+            Span::styled(" rt ", theme.label),
+            Span::styled(rate, theme.value),
+            Span::styled(" eta ", theme.label),
+            Span::styled(eta, theme.value),
+        ])
+    } else {
+        let rate = app
+            .rate_per_min(now)
+            .map(|r| format!("{r:.1}/min"))
+            .unwrap_or_else(|| "--".into());
+        let eta = app
+            .eta(now)
+            .map(fmt_clock)
+            .unwrap_or_else(|| "--:--:--".into());
+        Line::from(vec![
+            Span::styled("elapsed ", theme.label),
+            Span::styled(fmt_clock(app.elapsed(now)), theme.value),
+            Span::styled("   rate ", theme.label),
+            Span::styled(rate, theme.value),
+            Span::styled("   eta ", theme.label),
+            Span::styled(eta, theme.value),
+        ])
+    };
     frame.render_widget(Paragraph::new(vec![Line::from(line1), line2]), inner);
+}
+
+fn fmt_eta_compact(d: Duration) -> String {
+    let total_minutes = (d.as_secs() + 30) / 60;
+    format!("{:02}:{:02}", total_minutes / 60, total_minutes % 60)
 }
 
 fn render_counters(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
@@ -335,8 +362,8 @@ fn render_popup(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
     );
 }
 
-fn render_tiny(frame: &mut Frame, area: Rect, app: &App, now: Instant, theme: &Theme) {
-    let [bar_area, info, footer] = Layout::vertical([
+fn render_tiny(frame: &mut Frame, area: Rect, app: &App, _now: Instant, theme: &Theme) {
+    let [bar_area, _, footer] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Min(0),
         Constraint::Length(1),
@@ -354,18 +381,5 @@ fn render_tiny(frame: &mut Frame, area: Rect, app: &App, now: Instant, theme: &T
     );
     spans.push(Span::styled(counts, theme.value));
     frame.render_widget(Paragraph::new(Line::from(spans)), bar_area);
-    let line = Line::from(vec![
-        Span::styled("elapsed ", theme.label),
-        Span::styled(fmt_clock(app.elapsed(now)), theme.value),
-        Span::styled(
-            format!("   failed {}", app.failed),
-            if app.failed > 0 {
-                theme.err
-            } else {
-                theme.label
-            },
-        ),
-    ]);
-    frame.render_widget(Paragraph::new(line), info);
     render_footer(frame, footer, app, theme);
 }

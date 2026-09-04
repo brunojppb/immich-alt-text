@@ -80,15 +80,40 @@ fn run_screen_120x40() {
 }
 
 #[test]
-fn run_screen_80x24_stacks_counters() {
+fn run_screen_80x24_keeps_side_by_side_and_shows_in_flight() {
     let now = Instant::now();
+    let rendered = render_to_string(80, 24, &running_app(now), now);
+    let layout_line = rendered.lines().nth(1).unwrap();
+    assert!(layout_line.contains("╭ progress"));
+    assert!(layout_line.contains("╭ counters"));
+    assert!(rendered.contains("╭ in flight"));
+    assert!(rendered.contains("done        1 284"));
+    assert!(rendered.contains("failed          3"));
+    assert!(rendered.contains("avg total   4.7 s"));
+    assert!(rendered.contains("eta "));
     snapshot("run_80x24", 80, 24, &running_app(now), now);
 }
 
 #[test]
 fn run_screen_40x10_is_tiny() {
     let now = Instant::now();
+    let rendered = render_to_string(40, 10, &running_app(now), now);
+    assert!(!rendered.contains("elapsed "));
+    assert!(!rendered.contains("failed "));
+    assert!(!rendered.contains("╭ progress"));
+    assert!(!rendered.contains("╭ counters"));
+    assert!(!rendered.contains("╭ log"));
     snapshot("run_40x10", 40, 10, &running_app(now), now);
+}
+
+#[test]
+fn run_screen_79x23_stacks_and_hides_in_flight() {
+    let now = Instant::now();
+    let rendered = render_to_string(79, 23, &running_app(now), now);
+    let layout_line = rendered.lines().nth(1).unwrap();
+    assert!(layout_line.contains("╭ progress"));
+    assert!(!layout_line.contains("╭ counters"));
+    assert!(!rendered.contains("╭ in flight"));
 }
 
 #[test]
@@ -133,4 +158,12 @@ fn settings_screen_with_error_message() {
     app.settings.show_secrets = true;
     app.settings.message = Some("invalid config: run.workers must be at least 1".into());
     snapshot("settings_error_100x30", 100, 30, &app, now);
+}
+
+fn render_to_string(width: u16, height: u16, app: &App, now: Instant) -> String {
+    let backend = TestBackend::new(width, height);
+    let mut terminal = Terminal::new(backend).unwrap();
+    let theme = Theme::btop();
+    terminal.draw(|f| ui::render(f, app, now, &theme)).unwrap();
+    terminal.backend().to_string()
 }

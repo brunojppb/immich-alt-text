@@ -96,3 +96,78 @@ impl Theme {
         Color::Indexed(STOPS[i])
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn from_name_selects_the_expected_variant() {
+        let btop = Theme::from_name(ThemeName::Btop);
+        assert_eq!(btop.border, Theme::btop().border);
+        assert_eq!(btop.ok, Theme::btop().ok);
+
+        let mono = Theme::from_name(ThemeName::Mono);
+        assert_eq!(mono.border, Theme::mono().border);
+        assert_eq!(mono.accent, Theme::mono().accent);
+    }
+
+    #[test]
+    fn mono_turns_colors_off() {
+        let theme = Theme::mono();
+        let plain = Style::default();
+
+        assert_eq!(theme.border, plain);
+        assert_eq!(theme.label, plain);
+        assert_eq!(theme.value, plain);
+        assert_eq!(theme.ok, plain);
+        assert_eq!(theme.err, plain);
+        assert_eq!(theme.warn, plain);
+        assert_eq!(theme.info, plain);
+        assert_eq!(theme.name, plain);
+        assert_eq!(theme.duration, plain);
+        assert_eq!(theme.bar_empty, plain);
+        assert_eq!(theme.title, plain.add_modifier(Modifier::BOLD));
+        assert_eq!(theme.accent, plain.add_modifier(Modifier::BOLD));
+        assert_eq!(theme.dim, plain.add_modifier(Modifier::DIM));
+        assert_eq!(theme.highlight, plain.add_modifier(Modifier::REVERSED));
+        assert_eq!(theme.bar_color(0.5), Color::Reset);
+    }
+
+    #[test]
+    fn state_style_maps_status_words_to_expected_styles() {
+        let theme = Theme::btop();
+
+        assert_eq!(
+            theme.state_style("RUNNING"),
+            theme.ok.add_modifier(Modifier::BOLD)
+        );
+        assert_eq!(
+            theme.state_style("PAUSED"),
+            theme.warn.add_modifier(Modifier::BOLD)
+        );
+        assert_eq!(
+            theme.state_style("ERROR"),
+            theme.err.add_modifier(Modifier::BOLD)
+        );
+        assert_eq!(
+            theme.state_style("IDLE"),
+            theme.info.add_modifier(Modifier::BOLD)
+        );
+        assert_eq!(
+            theme.state_style("FINISHED"),
+            theme.info.add_modifier(Modifier::BOLD)
+        );
+    }
+
+    #[test]
+    fn bar_color_uses_gradient_stops_and_clamps_input() {
+        let theme = Theme::btop();
+
+        assert_eq!(theme.bar_color(-1.0), Color::Indexed(46));
+        assert_eq!(theme.bar_color(0.0), Color::Indexed(46));
+        assert_eq!(theme.bar_color(0.5), Color::Indexed(226));
+        assert_eq!(theme.bar_color(1.0), Color::Indexed(196));
+        assert_eq!(theme.bar_color(2.0), Color::Indexed(196));
+    }
+}

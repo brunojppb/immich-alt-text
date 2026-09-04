@@ -4,7 +4,7 @@ expression: terminal.backend()
 ---
 "╭ immich-alt-text ─ photos.hom RUNNING ╮"
 "│██████████░░░░░░░░░░░░░ 1 287 / 3 102 │"
-"│elapsed 01:42:17   failed 3           │"
+"│                                      │"
 "│                                      │"
 "│                                      │"
 "│                                      │"
