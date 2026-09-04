@@ -175,16 +175,35 @@ pub fn save(path: &Path, config: &Config) -> Result<(), ConfigError> {
     }
 
     let text = toml::to_string_pretty(config)?;
-    std::fs::write(path, text).map_err(io)?;
 
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
+        use std::io::Write;
 
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).map_err(io)?;
+        let mut file = create_owner_only_file(path).map_err(io)?;
+        file.write_all(text.as_bytes()).map_err(io)?;
+        file.flush().map_err(io)?;
+    }
+
+    #[cfg(not(unix))]
+    {
+        std::fs::write(path, text).map_err(io)?;
     }
 
     Ok(())
+}
+
+#[cfg(unix)]
+fn create_owner_only_file(path: &Path) -> std::io::Result<std::fs::File> {
+    use std::fs::OpenOptions;
+    use std::os::unix::fs::OpenOptionsExt;
+
+    OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .write(true)
+        .mode(0o600)
+        .open(path)
 }
 
 fn invalid(message: impl Into<String>) -> ConfigError {
@@ -268,8 +287,24 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn saves_with_owner_only_permissions() {
+    fn creates_a_new_file_with_owner_only_permissions() {
         use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+
+        let file = create_owner_only_file(&path).unwrap();
+        drop(file);
+
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn save_keeps_owner_only_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
         save(&path, &full()).unwrap();
