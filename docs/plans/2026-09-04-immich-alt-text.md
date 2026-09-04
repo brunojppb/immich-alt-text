@@ -170,6 +170,7 @@ pub enum Event {
     Fatal { error: String },
     /// Result of a settings-screen connection test. `Ok` holds a short status text.
     ConnectionTest {
+        id: u64,
         immich: Result<String, String>,
         llm: Result<String, String>,
     },
@@ -2766,7 +2767,7 @@ mod tests {
         a.on_key(Key::Char('c'));
         assert!(matches!(a.on_key(Key::CtrlT), Some(Action::TestConnections(_))));
         assert!(a.settings.testing);
-        a.on_event(Event::ConnectionTest { immich: Ok("v3.1.0".into()), llm: Err("HTTP 401".into()) });
+        a.on_event(Event::ConnectionTest { id: 1, immich: Ok("v3.1.0".into()), llm: Err("HTTP 401".into()) });
         assert!(!a.settings.testing);
         let (i, l) = a.settings.test_result.clone().unwrap();
         assert_eq!(i, Ok("v3.1.0".into()));
@@ -2952,7 +2953,7 @@ impl App {
                 self.in_flight.clear();
                 self.run_state = RunState::Error(error);
             }
-            Event::ConnectionTest { immich, llm } => {
+            Event::ConnectionTest { id, immich, llm } if id == self.connection_test_id => {
                 self.settings.testing = false;
                 self.settings.test_result = Some((immich, llm));
             }
@@ -4224,7 +4225,7 @@ async fn test_connections(cfg: Config, tx: mpsc::Sender<Event>) {
             .unwrap_or_else(|_| Err("timed out".to_string()))
     };
     let (immich, llm) = tokio::join!(timed(immich), timed(llm));
-    let _ = tx.send(Event::ConnectionTest { immich, llm }).await;
+    let _ = tx.send(Event::ConnectionTest { id, immich, llm }).await;
 }
 ```
 

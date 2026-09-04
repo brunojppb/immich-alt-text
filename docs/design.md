@@ -116,7 +116,7 @@ enum Event {
     AssetFailed { id: String, name: String, error: String },
     RunFinished { done: u64, failed: u64, elapsed: Duration },
     Fatal { error: String },
-    ConnectionTest { immich: Result<String, String>, llm: Result<String, String> },
+    ConnectionTest { id: u64, immich: Result<String, String>, llm: Result<String, String> },
 }
 ```
 
@@ -230,7 +230,7 @@ bright values, one colored word for state.
 │ ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────╯ │
 │ ╭─ log ────────────────────────────────────────────────────────────────────────────────────────────────────╮ │
 │ │ 18:42:11  ✓ IMG_4470.HEIC  4.3 s  A golden retriever sits on a wooden dock at sunset, looking toward…    │ │
-│ │ 18:42:02  ✗ IMG_4468.HEIC        llm: timeout after 120 s (3 tries)                                      │ │
+│ │ 18:42:02  ✗ IMG_4468.HEIC        llm: timeout after 120 s (3 retries, 4 attempts)                    │ │
 │ ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────╯ │
 │  s start   p pause   ↑↓ scroll log   enter expand   c settings   q quit                                        │
 ╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
