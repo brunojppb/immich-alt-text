@@ -18,7 +18,15 @@ start the run at any time. Hand-written descriptions are never touched.
 ## Requirements
 
 - Rust 1.88 or newer.
-- An Immich server and an API key (Account settings → API keys).
+- An Immich server and an API key (Account settings → API keys). For the least
+  privilege, enable these permissions when creating the key:
+  - `asset.read` — list assets and read their descriptions.
+  - `asset.view` — download preview thumbnails for images.
+  - `asset.update` — write the generated description back to Immich.
+  The CLI's server-version check does not need an additional permission. These
+  are Immich's fine-grained API-key permissions (see the [Immich API
+  documentation](https://api.immich.app/)); on older Immich versions that do not
+  offer them, use the server's full-access API-key option instead.
 - A vision model behind an OpenAI-compatible API. Tested with LM Studio at
   `http://localhost:1234/v1`. Ollama, llama.cpp server, vLLM, OpenRouter, and OpenAI
   work with the same setting.
