@@ -78,12 +78,13 @@ fn completion(text: &str) -> serde_json::Value {
 struct NotifyResponder {
     notify: Arc<Notify>,
     status: u16,
+    delay: Duration,
 }
 
 impl Respond for NotifyResponder {
     fn respond(&self, _request: &Request) -> ResponseTemplate {
         self.notify.notify_one();
-        ResponseTemplate::new(self.status)
+        ResponseTemplate::new(self.status).set_delay(self.delay)
     }
 }
 
@@ -1038,6 +1039,7 @@ async fn fatal_cancellation_wins_over_saturated_non_terminal_events() {
         .respond_with(NotifyResponder {
             notify: fatal_response.clone(),
             status: 401,
+            delay: Duration::ZERO,
         })
         .expect(1)
         .mount(&immich)
@@ -1075,6 +1077,97 @@ async fn fatal_cancellation_wins_over_saturated_non_terminal_events() {
         !matches!(event, Event::Fatal { .. })
     })
     .await;
+    handle.shutdown(Duration::from_secs(1)).await;
+}
+
+#[tokio::test]
+async fn restart_waits_for_active_cancelled_run_write_to_finish() {
+    const JPEG_A1: &[u8] = &[0xFF, 0xD8, 0xFF, 0xA1];
+    const JPEG_A2: &[u8] = &[0xFF, 0xD8, 0xFF, 0xA2];
+
+    let immich = MockServer::start().await;
+    let llm = MockServer::start().await;
+    let write_started = Arc::new(Notify::new());
+    mount_search_page(
+        &immich,
+        1,
+        10,
+        &[("a1", "IMG_1.HEIC", None), ("a2", "IMG_2.HEIC", None)],
+        None,
+    )
+    .await;
+    mount_preview(&immich, "a1", JPEG_A1, Duration::ZERO, 200).await;
+    mount_preview(&immich, "a2", JPEG_A2, Duration::from_millis(100), 200).await;
+    Mock::given(method("PUT"))
+        .and(path("/api/assets/a1"))
+        .respond_with(NotifyResponder {
+            notify: write_started.clone(),
+            status: 200,
+            delay: Duration::from_secs(1),
+        })
+        .mount(&immich)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .and(body_string_contains(
+            base64::engine::general_purpose::STANDARD.encode(JPEG_A1),
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(completion("ok 1")))
+        .mount(&llm)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .and(body_string_contains(
+            base64::engine::general_purpose::STANDARD.encode(JPEG_A2),
+        ))
+        .respond_with(ResponseTemplate::new(401))
+        .up_to_n_times(1)
+        .expect(1)
+        .mount(&llm)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .and(body_string_contains(
+            base64::engine::general_purpose::STANDARD.encode(JPEG_A2),
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(completion("ok 2")))
+        .mount(&llm)
+        .await;
+
+    let (tx, mut rx) = mpsc::channel(256);
+    let handle = engine::spawn_with(config_with_run(&immich, &llm, 2, 3, 10), tx, fast()).unwrap();
+    handle.send(Command::Start).await;
+    tokio::time::timeout(Duration::from_secs(1), write_started.notified())
+        .await
+        .expect("first run did not start its write");
+    collect_until(&mut rx, |event| matches!(event, Event::Fatal { .. })).await;
+
+    {
+        let restart = handle.send(Command::Start);
+        tokio::pin!(restart);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), &mut restart)
+                .await
+                .is_err(),
+            "restart was acknowledged while the cancelled run's write was still active"
+        );
+
+        let search_requests = immich
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|request| request.url.path() == "/api/search/metadata")
+            .count();
+        assert_eq!(
+            search_requests, 1,
+            "replacement discovery started before the old write finished"
+        );
+
+        tokio::time::timeout(Duration::from_secs(2), &mut restart)
+            .await
+            .expect("restart did not continue after the old write finished");
+    }
     handle.shutdown(Duration::from_secs(1)).await;
 }
 

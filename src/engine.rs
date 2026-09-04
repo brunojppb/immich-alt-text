@@ -185,14 +185,22 @@ impl Engine {
                     let Some(ControlMessage { cmd, ack }) = cmd else { break };
                     match cmd {
                         Command::Start => {
-                            let busy = run.as_ref().is_some_and(|run| {
-                                run.active.load(Ordering::Acquire) && !run.token.is_cancelled()
-                            });
-                            if !busy {
+                            let active = run
+                                .as_ref()
+                                .is_some_and(|run| run.active.load(Ordering::Acquire));
+                            let restartable = !active
+                                || run
+                                    .as_ref()
+                                    .is_some_and(|run| run.token.is_cancelled());
+                            if restartable {
                                 if let Some(run) = run.take() {
                                     run.token.cancel();
                                     run.terminal_cancel.cancel();
-                                    retired_runs.push(run.task);
+                                    if active {
+                                        let _ = run.task.await;
+                                    } else {
+                                        retired_runs.push(run.task);
+                                    }
                                 }
                                 run = Some(self.clone().start_run());
                             }
