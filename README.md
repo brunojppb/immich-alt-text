@@ -3,7 +3,11 @@
 A small terminal app that describes the photos in your [Immich](https://immich.app)
 library with a vision model and writes the text back as each photo's description.
 
+![immich-alt-text running in the terminal](tui.jpg)
+
 Built with Rust and [Ratatui](https://ratatui.rs). Personal project, experimental.
+See the [architecture guide](ARCHITECTURE.md) for the CLI's module boundaries,
+runtime lifecycle, concurrency model, TUI behavior, and testing seams.
 
 ## What it does
 
