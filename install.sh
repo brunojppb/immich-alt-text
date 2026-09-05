@@ -144,11 +144,16 @@ tar -xzf "$archive_path" -C "$extract_dir" || die "Downloaded archive could not 
 extracted_binary="$extract_dir/$BINARY_NAME"
 [ -f "$extracted_binary" ] && [ -x "$extracted_binary" ] || die "Archive did not contain an executable '$BINARY_NAME'."
 
+destination="$install_dir/$BINARY_NAME"
+[ -d "$destination" ] && die "Install destination '$destination' is a directory."
+
 install_tmp=$(mktemp "$install_dir/.${BINARY_NAME}.XXXXXX") || die "Could not create a file in '$install_dir'."
 cp "$extracted_binary" "$install_tmp" || die "Could not copy '$BINARY_NAME' into '$install_dir'."
 chmod 755 "$install_tmp" || die "Could not make the installed binary executable."
-mv -f "$install_tmp" "$install_dir/$BINARY_NAME" || die "Could not install '$BINARY_NAME' into '$install_dir'."
+mv -f "$install_tmp" "$destination" || die "Could not install '$BINARY_NAME' into '$install_dir'."
 install_tmp=""
+
+[ -f "$destination" ] && [ -x "$destination" ] || die "Installed '$BINARY_NAME' is not executable."
 
 printf 'Installed %s to %s/%s\n' "$BINARY_NAME" "$install_dir" "$BINARY_NAME"
 case ":${PATH:-}:" in

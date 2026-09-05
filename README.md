@@ -163,4 +163,4 @@ version, creates the `v<version>` tag, builds the three supported archives, and
 publishes them to GitHub Releases with matching `.sha256` files and release
 notes.
 
-Design: `docs/design.md`. Plan: `docs/plans/2026-09-04-immich-alt-text.md`.
+Architecture: [ARCHITECTURE.md](ARCHITECTURE.md).
