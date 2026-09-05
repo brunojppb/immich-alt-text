@@ -199,17 +199,17 @@ fn save_with_checkpoint(
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."));
-    std::fs::create_dir_all(parent).map_err(&io)?;
+    std::fs::create_dir_all(parent).map_err(io)?;
 
-    let (mut file, pending) = create_temp_file(path).map_err(&io)?;
-    checkpoint(SaveStage::Write).map_err(&io)?;
-    file.write_all(text.as_bytes()).map_err(&io)?;
-    checkpoint(SaveStage::Flush).map_err(&io)?;
-    file.flush().map_err(&io)?;
-    checkpoint(SaveStage::Sync).map_err(&io)?;
-    file.sync_all().map_err(&io)?;
+    let (mut file, pending) = create_temp_file(path).map_err(io)?;
+    checkpoint(SaveStage::Write).map_err(io)?;
+    file.write_all(text.as_bytes()).map_err(io)?;
+    checkpoint(SaveStage::Flush).map_err(io)?;
+    file.flush().map_err(io)?;
+    checkpoint(SaveStage::Sync).map_err(io)?;
+    file.sync_all().map_err(io)?;
     drop(file);
-    pending.persist(path).map_err(&io)?;
+    pending.persist(path).map_err(io)?;
 
     Ok(())
 }
