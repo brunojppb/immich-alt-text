@@ -21,7 +21,7 @@ start the run at any time. Hand-written descriptions are never touched.
 
 ## Requirements
 
-- Rust 1.88 or newer.
+- Rust 1.88 or newer (only when building from source).
 - An Immich server and an API key (Account settings → API keys). For the least
   privilege, enable these permissions when creating the key:
   - `asset.read` — list assets and read their descriptions.
@@ -35,10 +35,51 @@ start the run at any time. Hand-written descriptions are never touched.
   `http://localhost:1234/v1`. Ollama, llama.cpp server, vLLM, OpenRouter, and OpenAI
   work with the same setting.
 
-## Run
+## Install a pre-built binary
+
+The installer downloads the latest release for your platform, verifies its
+SHA-256 checksum, and installs `immich-alt-text` to `~/.local/bin` by default.
+
+| Platform | Architecture | Release target |
+| --- | --- | --- |
+| Linux | x86_64 / AMD64 | `x86_64-unknown-linux-musl` |
+| Linux | ARM64 | `aarch64-unknown-linux-musl` |
+| macOS | Apple Silicon | `aarch64-apple-darwin` |
+
+For a quick install:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/brunojppb/immich-alt-text/main/install.sh | sh
+```
+
+For the safer download-then-run option, inspect the script before executing it:
+
+```bash
+curl -fsSLO https://raw.githubusercontent.com/brunojppb/immich-alt-text/main/install.sh
+less install.sh
+sh install.sh
+```
+
+Set `INSTALL_DIR` to use another writable directory:
+
+```bash
+INSTALL_DIR="$HOME/bin" sh install.sh
+```
+
+The installer creates the directory if needed but never runs `sudo`. It prints
+PATH guidance when the selected directory is not already on your PATH.
+
+### Build from source
 
 ```bash
 cargo install --path .
+```
+
+Building from source requires Rust 1.88 or newer.
+
+## Run
+
+```bash
 immich-alt-text
 ```
 
@@ -113,27 +154,13 @@ cargo test
 cargo clippy --all-targets -- -D warnings
 ```
 
-### Pull request build artifacts
+### Releases
 
-Every pull request opened, synchronized, or reopened builds three release
-binaries. Open the workflow run's artifacts in GitHub Actions to download
-either one of these target-specific artifacts or the combined
-`immich-alt-text-builds` bundle:
-
-- `immich-alt-text-x86_64-unknown-linux-musl` — portable Linux x86_64
-- `immich-alt-text-aarch64-unknown-linux-musl` — portable Linux ARM64
-- `immich-alt-text-aarch64-apple-darwin` — Apple Silicon macOS
-
-GitHub downloads each artifact as an outer `.zip` file. After extracting it, a
-target-specific artifact contains one inner `.tar.gz`; the combined
-`immich-alt-text-builds` artifact contains all three inner target archives.
-Each `.tar.gz` has the executable `immich-alt-text` at its archive root.
-
-These PR artifacts are retained for 14 days. To download one, open the pull
-request's **Checks** tab, select the **Build artifacts** workflow run, and
-choose an artifact from the **Artifacts** section.
-
-These are unsigned development artifacts. Tag-triggered GitHub Releases,
-signing, and checksums are intentionally deferred.
+Releases are published only when a maintainer manually dispatches the release
+workflow from `main` with a version. Pull requests, pushes, and tag creation do
+not publish a release automatically. The workflow updates the Cargo package
+version, creates the `v<version>` tag, builds the three supported archives, and
+publishes them to GitHub Releases with matching `.sha256` files and release
+notes.
 
 Design: `docs/design.md`. Plan: `docs/plans/2026-09-04-immich-alt-text.md`.
