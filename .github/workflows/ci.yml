@@ -17,20 +17,20 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Install Rust 1.88
+      - name: Install pinned Rust toolchain
         shell: bash
         run: |
-          rustup toolchain install 1.88.0 --profile minimal --no-self-update
-          rustup component add rustfmt clippy --toolchain 1.88.0
+          rustup show active-toolchain
+          rustup component add rustfmt clippy
 
       - name: Build
-        run: cargo +1.88.0 build --locked
+        run: cargo build --locked
 
       - name: Test
-        run: cargo +1.88.0 test --locked
+        run: cargo test --locked
 
       - name: Check formatting
-        run: cargo +1.88.0 fmt -- --check
+        run: cargo fmt -- --check
 
       - name: Run Clippy
-        run: cargo +1.88.0 clippy --locked --all-targets -- -D warnings
+        run: cargo clippy --locked --all-targets -- -D warnings

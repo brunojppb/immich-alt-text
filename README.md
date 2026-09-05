@@ -21,7 +21,8 @@ start the run at any time. Hand-written descriptions are never touched.
 
 ## Requirements
 
-- Rust 1.88 or newer (only when building from source).
+- Rust 1.88 or newer (only when building from source). The repository pins its
+  development toolchain in `rust-toolchain.toml`.
 - An Immich server and an API key (Account settings → API keys). For the least
   privilege, enable these permissions when creating the key:
   - `asset.read` — list assets and read their descriptions.

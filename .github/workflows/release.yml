@@ -40,9 +40,9 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Install Rust 1.88
+      - name: Install pinned Rust toolchain
         shell: bash
-        run: rustup toolchain install 1.88.0 --profile minimal --no-self-update
+        run: rustup show active-toolchain
 
       - name: Create and push release commit and tag
         id: release
@@ -70,8 +70,8 @@ jobs:
             exit 1
           fi
 
-          cargo +1.88.0 check
-          cargo +1.88.0 check --locked
+          cargo check
+          cargo check --locked
 
           if git diff --quiet -- Cargo.toml; then
             echo "Version $VERSION does not change Cargo.toml." >&2
@@ -126,11 +126,11 @@ jobs:
           ref: ${{ needs.prepare.outputs.tag }}
           persist-credentials: false
 
-      - name: Install Rust 1.88 and target
+      - name: Install pinned Rust toolchain and target
         shell: bash
         run: |
-          rustup toolchain install 1.88.0 --profile minimal --no-self-update
-          rustup target add "${{ matrix.target }}" --toolchain 1.88.0
+          rustup show active-toolchain
+          rustup target add "${{ matrix.target }}"
 
       - name: Install Zig
         if: matrix.platform == 'linux'
@@ -144,11 +144,11 @@ jobs:
 
       - name: Build Linux musl binary
         if: matrix.platform == 'linux'
-        run: cargo +1.88.0 zigbuild --locked --release --target "${{ matrix.target }}"
+        run: cargo zigbuild --locked --release --target "${{ matrix.target }}"
 
       - name: Build Apple Silicon binary
         if: matrix.platform == 'macos'
-        run: cargo +1.88.0 build --locked --release --target "${{ matrix.target }}"
+        run: cargo build --locked --release --target "${{ matrix.target }}"
 
       - name: Smoke test native binary
         if: matrix.target == 'x86_64-unknown-linux-musl' || matrix.target == 'aarch64-apple-darwin'
