@@ -18,8 +18,9 @@ pub const WORKERS: usize = 8;
 pub const RETRIES: usize = 9;
 pub const MAX_TOKENS: usize = 10;
 pub const THEME: usize = 11;
+pub const DRY_RUN: usize = 12;
 
-const FIELD_COUNT: usize = THEME + 1;
+const FIELD_COUNT: usize = DRY_RUN + 1;
 pub const PROMPT_WRAP_WIDTH: usize = 43;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -44,6 +45,7 @@ pub type TestResult = (Result<String, String>, Result<String, String>);
 pub struct SettingsForm {
     pub fields: Vec<Field>,
     pub theme: ThemeName,
+    pub dry_run: bool,
     /// Cursor position in the prompt, measured in Unicode grapheme clusters.
     pub prompt_cursor: usize,
     prompt_width: Cell<usize>,
@@ -79,10 +81,11 @@ impl SettingsForm {
             field("retries", cfg.run.retries.to_string(), false),
             field("max tokens", cfg.llm.max_tokens.to_string(), false),
         ];
-        debug_assert_eq!(fields.len() + 1, FIELD_COUNT);
+        debug_assert_eq!(fields.len() + 2, FIELD_COUNT);
         Self {
             fields,
             theme: cfg.ui.theme,
+            dry_run: cfg.run.dry_run,
             prompt_cursor: cfg.llm.prompt.graphemes(true).count(),
             prompt_width: Cell::new(PROMPT_WRAP_WIDTH),
             focused: 0,
@@ -214,6 +217,14 @@ impl SettingsForm {
         self.theme = self.theme.previous();
     }
 
+    pub fn select_dry_run_next(&mut self) {
+        self.dry_run = true;
+    }
+
+    pub fn select_dry_run_prev(&mut self) {
+        self.dry_run = false;
+    }
+
     pub fn toggle_secrets(&mut self) {
         self.show_secrets = !self.show_secrets;
     }
@@ -271,6 +282,7 @@ impl SettingsForm {
             .parse()
             .map_err(|_| "max tokens must be a whole number".to_string())?;
         cfg.ui.theme = self.theme;
+        cfg.run.dry_run = self.dry_run;
         cfg.validate().map_err(|error| error.to_string())?;
         Ok(cfg)
     }
@@ -365,6 +377,7 @@ mod tests {
         assert_eq!(f.fields[RETRIES].value, "3");
         assert_eq!(f.fields[MAX_TOKENS].value, "200");
         assert_eq!(f.theme, ThemeName::Btop);
+        assert!(!f.dry_run);
         assert_eq!(f.focused, 0);
     }
 
@@ -381,7 +394,7 @@ mod tests {
     fn focus_wraps_both_ways() {
         let mut f = SettingsForm::from_config(&base());
         f.focus_prev();
-        assert_eq!(f.focused, THEME);
+        assert_eq!(f.focused, DRY_RUN);
         f.focus_next();
         assert_eq!(f.focused, IMMICH_URL);
     }
@@ -396,6 +409,26 @@ mod tests {
         assert_eq!(f.theme, ThemeName::Btop);
         f.insert('x');
         assert!(f.fields.iter().all(|field| !field.value.ends_with('x')));
+    }
+
+    #[test]
+    fn dry_run_selection_toggles_without_text_editing() {
+        let mut f = SettingsForm::from_config(&base());
+        f.focused = DRY_RUN;
+        f.select_dry_run_next();
+        assert!(f.dry_run);
+        f.select_dry_run_prev();
+        assert!(!f.dry_run);
+        f.insert('x');
+        assert!(f.fields.iter().all(|field| !field.value.ends_with('x')));
+    }
+
+    #[test]
+    fn to_config_persists_dry_run_selection() {
+        let mut f = SettingsForm::from_config(&base());
+        f.dry_run = true;
+        let cfg = f.to_config(&base()).unwrap();
+        assert!(cfg.run.dry_run);
     }
 
     #[test]

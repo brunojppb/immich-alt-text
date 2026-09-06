@@ -4,7 +4,7 @@ This document describes the implementation at the current `main` revision. It is
 
 ## Overview
 
-`immich-alt-text` is a foreground Rust terminal application. For each Immich image whose EXIF description is absent or blank, it downloads Immich's preview rendition, asks an OpenAI-compatible vision model for a short description, and writes that text back to the asset. Immich is the durable work ledger: a later run searches again and skips assets that already have nonblank descriptions. The application itself has no database, queue service, daemon, or background process.
+`immich-alt-text` is a foreground Rust terminal application. For each Immich image whose EXIF description is absent or blank, it downloads Immich's preview rendition and asks an OpenAI-compatible vision model for a short description. In normal mode it writes that text back to the asset; in dry-run mode it performs the same discovery and model work but skips the Immich update. Immich is the durable work ledger: a later normal run searches again and skips assets that already have nonblank descriptions. The application itself has no database, queue service, daemon, or background process.
 
 The implementation separates four kinds of work:
 
@@ -113,7 +113,7 @@ sequenceDiagram
 
 The panic hook installed by [`install_panic_hook`](src/main.rs#L101-L108) restores the terminal before delegating to Rust's default panic hook. On the nonpanic path, `ratatui::restore()` runs after `run` returns, including when drawing or another loop operation returns an error. The panic hook is terminal hygiene, not graceful engine shutdown; ordinary loop exit uses the explicit shutdown path.
 
-When setup is required, no engine is created. Otherwise [`spawn_runtime`](src/main.rs#L180-L188) creates a bounded event channel of 1,024 messages, validates and constructs the engine, and starts its control loop. Construction does not start an asset run; the engine remains idle until `Command::Start`.
+When setup is required, no engine is created. Otherwise [`spawn_runtime`](src/main.rs#L180-L188) creates a bounded event channel of 1,024 messages, validates and constructs the engine, and starts its control loop. The `--dry-run` CLI option is a process-local override layered onto the saved config before engine construction; saving settings does not persist that override. Construction does not start an asset run; the engine remains idle until `Command::Start`.
 
 ### Keyboard and event loop
 
@@ -157,9 +157,13 @@ Each accepted `Start` creates a [`Run`](src/engine.rs#L166-L174) with a child ca
 
 [`discover`](src/engine.rs#L389-L452) requests newest-first image pages, adds every returned item to `scanned`, filters with `Asset::needs_description`, adds wanted assets to `queued`, emits cumulative `PageLoaded`, and sends wanted assets to the worker queue. It follows `nextPage` only when the parsed value is greater than the current page. Dropping the sender after discovery tells workers that no more assets remain. `DiscoveryDone` reports the final queue size. Once discovery and all workers finish, `active` is cleared *before* attempting `RunFinished`; this ordering keeps restart live even under event-channel backpressure.
 
-An asset's observable order is:
+An asset's observable order in normal mode is:
 
 `AssetStarted` → `Fetching` → preview GET → `CallingLlm` → completion POST → `Writing` → description PUT → `AssetDone`.
+
+In dry-run mode the `Writing` stage and description `PUT` are omitted; the
+preview and completion requests, generated description, completion event, and
+run counters remain the same.
 
 Failures replace `AssetDone` with `AssetFailed`, unless the error is fatal or cancellation wins. Success and failure atomics supply the final `RunFinished` totals.
 
@@ -259,9 +263,10 @@ All config structs use Serde defaults, so omitted sections or keys receive these
 | `run.workers` | `1` | 1 through 64 |
 | `run.retries` | `3` | 0 through 10 |
 | `run.page_size` | `1000` | 1 through 1000; file-only |
+| `run.dry_run` | `false` | skips description updates when true; also available as the one-shot `--dry-run` CLI override |
 | `ui.theme` | `btop` | enum value `btop` or `mono`; editable with a selector |
 
-`page_size` is the only file-only setting. The settings form also edits the prompt, both timeouts in seconds, retry count, and theme, alongside Immich URL/key, LLM URL/key/model, workers, and max tokens. [`SettingsForm::to_config`](src/settings.rs#L97-L117) clones the committed config, overlays trimmed form values, parses numeric fields, and validates the result. `ctrl-u` clears the focused text field, which makes replacing the long default prompt practical; the theme row uses left/right arrows or `h`/`l` and never accepts text input.
+`page_size` is the only file-only setting. The settings form also edits the prompt, both timeouts in seconds, retry count, dry-run mode, and theme, alongside Immich URL/key, LLM URL/key/model, workers, and max tokens. [`SettingsForm::to_config`](src/settings.rs#L97-L117) clones the committed config, overlays trimmed form values, parses numeric fields, and validates the result. `ctrl-u` clears the focused text field, which makes replacing the long default prompt practical; the theme and dry-run rows use left/right arrows or `h`/`l` and never accept text input.
 
 [`config::save`](src/config.rs#L173-L215) validates before serialization, pretty-prints TOML, creates parent directories, and stages a uniquely named temporary file in the destination directory. The file is created exclusively and, on Unix, opened and explicitly set to mode `0600`. The implementation writes, flushes, calls `sync_all`, closes, and renames the temporary file over the destination. A guard removes an unpersisted temporary file on error. Same-directory rename gives atomic file replacement on supported filesystems and replaces a previously permissive file with an owner-only one. It does not fsync the parent directory, and non-Unix platforms do not receive a Unix permission guarantee.
 

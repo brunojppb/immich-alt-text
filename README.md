@@ -16,6 +16,10 @@ runtime lifecycle, concurrency model, TUI behavior, and testing seams.
 3. Sends it to an OpenAI-compatible chat endpoint with a vision model.
 4. Writes the returned sentence back to Immich.
 
+Use `--dry-run` or enable dry-run in the settings screen to perform discovery,
+preview downloads, and LLM calls without updating Immich descriptions. The CLI
+flag applies only to that invocation and overrides the saved setting.
+
 Immich keeps the state. A photo with a description is skipped, so you can stop and
 start the run at any time. Hand-written descriptions are never touched.
 
@@ -82,6 +86,8 @@ Building from source requires Rust 1.98 or newer.
 
 ```bash
 immich-alt-text
+# or inspect what would be written without changing Immich
+immich-alt-text --dry-run
 ```
 
 The first launch opens the settings screen. Fill in the Immich URL, the API key, the
@@ -103,7 +109,7 @@ screen. Press `s` to start.
 | settings | `ctrl-r` | show or hide API keys |
 | settings | `ctrl-t` | test both connections |
 | settings | `ctrl-s` | save and go back |
-| settings | `←` `→` or `h` `l` | choose the UI theme |
+| settings | `←` `→` or `h` `l` | choose the UI theme or dry-run mode |
 | settings | `←` `→` `↑` `↓` | move within the prompt |
 | settings | `enter` | add a prompt line break |
 | settings | `ctrl-u` | clear the focused text field |
@@ -132,13 +138,14 @@ visible. No preamble, no quotes, no "This image shows".
 workers = 1             # parallel LLM calls, 1–64
 retries = 3             # 0–10 retries; default backoff is 2 s, 4 s, 8 s
 page_size = 1000        # 1–1000
+dry_run = false         # describe assets without updating Immich
 
 [ui]
 theme = "btop"          # or "mono"
 ```
 
 `page_size` is file-only. The settings screen also lets you change the prompt,
-Immich and LLM timeouts, retry count, and UI theme.
+Immich and LLM timeouts, retry count, dry-run mode, and UI theme.
 
 The prompt is a multiline editor. Use the arrow keys to move within it, `enter`
 to add a line break, and `ctrl-u` to replace it quickly.

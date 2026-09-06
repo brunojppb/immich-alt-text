@@ -10,5 +10,5 @@ expression: terminal.backend()
 "│  retries            3                │"
 "│  max tokens         200              │"
 "│▸ theme              (●) btop   ( ) mo│"
-"│ ctrl-s save    ctrl-t test    ← → the│"
+"│ ctrl-s save    ctrl-t test    ← → sel│"
 "╰──────────────────────────────────────╯"

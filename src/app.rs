@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use crate::config::Config;
 use crate::events::{Action, Command, Event, Key, Stage};
-use crate::settings::{SettingsForm, THEME};
+use crate::settings::{SettingsForm, DRY_RUN, THEME};
 
 pub const LOG_CAP: usize = 500;
 pub const RATE_WINDOW: usize = 20;
@@ -71,11 +71,12 @@ pub struct App {
     pub settings: SettingsForm,
     pub footer_message: Option<String>,
     pub should_quit: bool,
+    dry_run_override: bool,
     connection_test_id: u64,
 }
 
 impl App {
-    pub fn new(config: Config, first_run: bool) -> Self {
+    pub fn new(config: Config, first_run: bool, dry_run_override: bool) -> Self {
         let settings = SettingsForm::from_config(&config);
         Self {
             config,
@@ -101,8 +102,13 @@ impl App {
             settings,
             footer_message: None,
             should_quit: false,
+            dry_run_override,
             connection_test_id: 0,
         }
+    }
+
+    pub fn is_dry_run(&self) -> bool {
+        self.config.run.dry_run || self.dry_run_override
     }
 
     pub fn on_event(&mut self, event: Event) {
@@ -369,6 +375,14 @@ impl App {
                 self.settings.select_theme_next();
                 None
             }
+            Key::Left | Key::Char('h') if self.settings.focused == DRY_RUN => {
+                self.settings.select_dry_run_prev();
+                None
+            }
+            Key::Right | Key::Char('l') if self.settings.focused == DRY_RUN => {
+                self.settings.select_dry_run_next();
+                None
+            }
             Key::Backspace if self.settings.focused < self.settings.fields.len() => {
                 self.settings.backspace();
                 None
@@ -508,7 +522,7 @@ mod tests {
     }
 
     fn app() -> App {
-        App::new(config(), false)
+        App::new(config(), false, false)
     }
 
     fn done(name: &str) -> Event {
@@ -523,7 +537,7 @@ mod tests {
 
     #[test]
     fn first_run_opens_settings() {
-        assert_eq!(App::new(config(), true).screen, Screen::Settings);
+        assert_eq!(App::new(config(), true, false).screen, Screen::Settings);
         assert_eq!(app().screen, Screen::Run);
     }
 
@@ -658,6 +672,13 @@ mod tests {
             Some(Action::Send(Command::Start)),
             "start again after an error"
         );
+    }
+
+    #[test]
+    fn cli_dry_run_override_is_visible_without_changing_saved_config() {
+        let a = App::new(config(), false, true);
+        assert!(a.is_dry_run());
+        assert!(!a.config.run.dry_run);
     }
 
     #[test]
@@ -854,7 +875,7 @@ mod tests {
     fn enter_on_last_field_saves() {
         let mut a = app();
         a.on_key(Key::Char('c'));
-        a.settings.focused = crate::settings::THEME;
+        a.settings.focused = crate::settings::DRY_RUN;
         assert!(matches!(a.on_key(Key::Enter), Some(Action::SaveConfig(_))));
     }
 

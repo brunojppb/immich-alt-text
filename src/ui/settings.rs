@@ -9,7 +9,7 @@ use unicode_segmentation::UnicodeSegmentation;
 use super::truncate;
 use crate::app::App;
 use crate::config::ThemeName;
-use crate::settings::{prompt_layout, IMMICH_KEY, LLM_KEY, PROMPT, THEME};
+use crate::settings::{prompt_layout, DRY_RUN, IMMICH_KEY, LLM_KEY, PROMPT, THEME};
 use crate::theme::Theme;
 
 const LABEL_WIDTH: usize = 19;
@@ -116,6 +116,10 @@ pub fn render(frame: &mut Frame, app: &App, theme: &Theme) {
         focused_line = lines.len();
     }
     lines.push(theme_line(form, theme));
+    if form.focused == DRY_RUN {
+        focused_line = lines.len();
+    }
+    lines.push(dry_run_line(form, theme));
     lines.push(Line::default());
     lines.push(test_line(app, theme));
     lines.push(match &form.message {
@@ -146,10 +150,44 @@ pub fn render(frame: &mut Frame, app: &App, theme: &Theme) {
     };
     let mut spans = key("ctrl-s", "save");
     spans.extend(key("ctrl-t", "test"));
-    spans.extend(key("← →", "theme"));
+    spans.extend(key("← →", "select"));
     spans.extend(key("ctrl-u", "clear"));
     spans.extend(key("esc", "back"));
     frame.render_widget(Paragraph::new(Line::from(spans)), footer);
+}
+
+fn dry_run_line(form: &crate::settings::SettingsForm, theme: &Theme) -> Line<'static> {
+    let focused = form.focused == DRY_RUN;
+    let selected = |enabled: bool| {
+        if form.dry_run == enabled {
+            if focused {
+                theme.accent
+            } else {
+                theme.value
+            }
+        } else {
+            theme.dim
+        }
+    };
+    let option = |enabled: bool, label: &str| {
+        let marker = if form.dry_run == enabled { "●" } else { " " };
+        Span::styled(format!("({marker}) {label}"), selected(enabled))
+    };
+    Line::from(vec![
+        Span::styled(if focused { "▸ " } else { "  " }, theme.accent),
+        Span::styled(
+            format!("{:<width$}", "dry run", width = LABEL_WIDTH),
+            theme.label,
+        ),
+        option(false, "off"),
+        Span::styled("   ", theme.dim),
+        option(true, "on"),
+        if focused {
+            Span::styled("   ← →", theme.dim)
+        } else {
+            Span::raw("")
+        },
+    ])
 }
 
 fn insert_cursor(value: &str, column: usize) -> String {

@@ -19,7 +19,7 @@ fn config() -> Config {
 
 /// A mid-run app with fixed numbers so the picture never changes between runs.
 fn running_app(now: Instant) -> App {
-    let mut app = App::new(config(), false);
+    let mut app = App::new(config(), false, false);
     app.run_state = RunState::Running;
     app.scanned = 14_920;
     app.queued = 3_102;
@@ -119,7 +119,7 @@ fn run_screen_79x23_stacks_and_hides_in_flight() {
 #[test]
 fn run_screen_idle() {
     let now = Instant::now();
-    let app = App::new(config(), false);
+    let app = App::new(config(), false, false);
     snapshot("run_idle_100x30", 100, 30, &app, now);
 }
 
@@ -134,6 +134,15 @@ fn run_screen_error_state() {
 }
 
 #[test]
+fn run_screen_shows_dry_run_mode() {
+    let now = Instant::now();
+    let mut app = running_app(now);
+    app.config.run.dry_run = true;
+    let rendered = render_to_string(100, 30, &app, now);
+    assert!(rendered.contains("DRY RUN"));
+}
+
+#[test]
 fn log_popup() {
     let now = Instant::now();
     let mut app = running_app(now);
@@ -144,7 +153,7 @@ fn log_popup() {
 #[test]
 fn settings_screen() {
     let now = Instant::now();
-    let mut app = App::new(config(), true);
+    let mut app = App::new(config(), true, false);
     assert_eq!(app.screen, Screen::Settings);
     app.settings.focused = 2;
     app.settings.test_result = Some((Ok("v3.1.0".into()), Err("HTTP 401 Unauthorized".into())));
@@ -154,7 +163,7 @@ fn settings_screen() {
 #[test]
 fn settings_screen_with_error_message() {
     let now = Instant::now();
-    let mut app = App::new(config(), true);
+    let mut app = App::new(config(), true, false);
     app.settings.show_secrets = true;
     app.settings.message = Some("invalid config: run.workers must be at least 1".into());
     snapshot("settings_error_100x30", 100, 30, &app, now);
@@ -163,7 +172,7 @@ fn settings_screen_with_error_message() {
 #[test]
 fn settings_screen_mono_theme_selection() {
     let now = Instant::now();
-    let mut app = App::new(config(), true);
+    let mut app = App::new(config(), true, false);
     app.settings.focused = immich_alt_text::settings::THEME;
     app.settings.theme = ThemeName::Mono;
     snapshot("settings_mono_100x30", 100, 30, &app, now);
@@ -172,7 +181,7 @@ fn settings_screen_mono_theme_selection() {
 #[test]
 fn settings_screen_prompt_editor() {
     let now = Instant::now();
-    let mut app = App::new(config(), true);
+    let mut app = App::new(config(), true, false);
     app.settings.focused = immich_alt_text::settings::PROMPT;
     snapshot("settings_prompt_80x24", 80, 24, &app, now);
 }
@@ -180,7 +189,7 @@ fn settings_screen_prompt_editor() {
 #[test]
 fn settings_screen_prompt_editor_scrolls_long_prompts() {
     let now = Instant::now();
-    let mut app = App::new(config(), true);
+    let mut app = App::new(config(), true, false);
     app.settings.focused = immich_alt_text::settings::PROMPT;
     app.settings.fields[immich_alt_text::settings::PROMPT].value =
         "one\ntwo\nthree\nfour\nfive".into();
@@ -197,7 +206,7 @@ fn settings_screen_prompt_editor_scrolls_long_prompts() {
 #[test]
 fn settings_screen_tiny_keeps_the_focused_row_visible() {
     let now = Instant::now();
-    let mut app = App::new(config(), true);
+    let mut app = App::new(config(), true, false);
     app.settings.focused = immich_alt_text::settings::THEME;
     let rendered = render_to_string(40, 10, &app, now);
     assert!(rendered.contains("theme"));
