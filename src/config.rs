@@ -100,6 +100,26 @@ pub enum ThemeName {
     Mono,
 }
 
+impl ThemeName {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Btop => "btop",
+            Self::Mono => "mono",
+        }
+    }
+
+    pub const fn next(self) -> Self {
+        match self {
+            Self::Btop => Self::Mono,
+            Self::Mono => Self::Btop,
+        }
+    }
+
+    pub const fn previous(self) -> Self {
+        self.next()
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
     #[error("cannot read or write {path}: {source}")]

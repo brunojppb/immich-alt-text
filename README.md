@@ -103,6 +103,8 @@ screen. Press `s` to start.
 | settings | `ctrl-r` | show or hide API keys |
 | settings | `ctrl-t` | test both connections |
 | settings | `ctrl-s` | save and go back |
+| settings | `←` `→` or `h` `l` | choose the UI theme |
+| settings | `ctrl-u` | clear the focused text field |
 | settings | `esc` | discard edits and go back |
 
 ## Config file
@@ -133,8 +135,8 @@ page_size = 1000        # 1–1000
 theme = "btop"          # or "mono"
 ```
 
-`prompt`, the timeouts, `retries`, `page_size`, and `theme` are file-only. The
-settings screen covers the rest.
+`page_size` is file-only. The settings screen also lets you change the prompt,
+Immich and LLM timeouts, retry count, and UI theme.
 
 ## Logs
 

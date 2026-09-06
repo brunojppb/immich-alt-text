@@ -7,14 +7,17 @@ use ratatui::Frame;
 
 use super::truncate;
 use crate::app::App;
-use crate::settings::{IMMICH_KEY, LLM_KEY};
+use crate::config::ThemeName;
+use crate::settings::{IMMICH_KEY, LLM_KEY, THEME};
 use crate::theme::Theme;
+
+const LABEL_WIDTH: usize = 19;
 
 pub fn render(frame: &mut Frame, app: &App, theme: &Theme) {
     let area = frame.area();
     let form = &app.settings;
     let width = area.width.saturating_sub(2).clamp(40, 78);
-    let height = (form.fields.len() as u16 + 8).min(area.height);
+    let height = (form.fields.len() as u16 + 9).min(area.height);
     let [v] = Layout::vertical([Constraint::Length(height)])
         .flex(Flex::Center)
         .areas(area);
@@ -29,7 +32,7 @@ pub fn render(frame: &mut Frame, app: &App, theme: &Theme) {
     let inner = block.inner(boxed);
     frame.render_widget(block, boxed);
 
-    let value_width = (inner.width as usize).saturating_sub(19 + 13);
+    let value_width = (inner.width as usize).saturating_sub(2 + LABEL_WIDTH + 13);
     let mut lines: Vec<Line<'static>> = Vec::new();
     for (i, field) in form.fields.iter().enumerate() {
         let focused = i == form.focused;
@@ -40,7 +43,10 @@ pub fn render(frame: &mut Frame, app: &App, theme: &Theme) {
         let value_style = if focused { theme.accent } else { theme.value };
         let mut spans = vec![
             Span::styled(if focused { "▸ " } else { "  " }, theme.accent),
-            Span::styled(format!("{:<17}", field.label), theme.label),
+            Span::styled(
+                format!("{:<width$}", field.label, width = LABEL_WIDTH),
+                theme.label,
+            ),
             Span::styled(
                 format!("{value:<width$}", width = value_width + 1),
                 value_style,
@@ -56,13 +62,23 @@ pub fn render(frame: &mut Frame, app: &App, theme: &Theme) {
         }
         lines.push(Line::from(spans));
     }
+    lines.push(theme_line(form, theme));
     lines.push(Line::default());
     lines.push(test_line(app, theme));
     lines.push(match &form.message {
         Some(msg) => Line::from(Span::styled(format!("  {msg}"), theme.err)),
         None => Line::default(),
     });
-    frame.render_widget(Paragraph::new(lines), inner);
+    let content_height = inner.height.saturating_sub(1);
+    let max_scroll = lines.len().saturating_sub(content_height as usize);
+    let visible_focus_offset = content_height.saturating_sub(1) as usize;
+    let mut scroll = form.focused.saturating_sub(visible_focus_offset);
+    scroll = scroll.min(max_scroll);
+    let content = Rect {
+        height: content_height,
+        ..inner
+    };
+    frame.render_widget(Paragraph::new(lines).scroll((scroll as u16, 0)), content);
 
     let footer = Rect {
         y: inner.y + inner.height.saturating_sub(1),
@@ -77,8 +93,44 @@ pub fn render(frame: &mut Frame, app: &App, theme: &Theme) {
     };
     let mut spans = key("ctrl-s", "save");
     spans.extend(key("ctrl-t", "test"));
+    spans.extend(key("← →", "theme"));
+    spans.extend(key("ctrl-u", "clear"));
     spans.extend(key("esc", "back"));
     frame.render_widget(Paragraph::new(Line::from(spans)), footer);
+}
+
+fn theme_line(form: &crate::settings::SettingsForm, theme: &Theme) -> Line<'static> {
+    let focused = form.focused == THEME;
+    let selected = |name: ThemeName| {
+        if form.theme == name {
+            if focused {
+                theme.accent
+            } else {
+                theme.value
+            }
+        } else {
+            theme.dim
+        }
+    };
+    let option = |name: ThemeName| {
+        let marker = if form.theme == name { "●" } else { " " };
+        Span::styled(format!("({marker}) {}", name.label()), selected(name))
+    };
+    Line::from(vec![
+        Span::styled(if focused { "▸ " } else { "  " }, theme.accent),
+        Span::styled(
+            format!("{:<width$}", "theme", width = LABEL_WIDTH),
+            theme.label,
+        ),
+        option(ThemeName::Btop),
+        Span::styled("   ", theme.dim),
+        option(ThemeName::Mono),
+        if focused {
+            Span::styled("   ← →", theme.dim)
+        } else {
+            Span::raw("")
+        },
+    ])
 }
 
 fn test_line(app: &App, theme: &Theme) -> Line<'static> {

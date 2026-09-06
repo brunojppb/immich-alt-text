@@ -86,6 +86,8 @@ pub enum Key {
     Char(char),
     Up,
     Down,
+    Left,
+    Right,
     Enter,
     Esc,
     Tab,
@@ -95,6 +97,7 @@ pub enum Key {
     CtrlS,
     CtrlT,
     CtrlR,
+    CtrlU,
 }
 
 /// Side effect requested by `App::on_key`. `main` performs it.

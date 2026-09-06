@@ -141,9 +141,12 @@ fn map_key(code: KeyCode, mods: KeyModifiers) -> Option<Key> {
         (KeyCode::Char('s'), true) => Key::CtrlS,
         (KeyCode::Char('t'), true) => Key::CtrlT,
         (KeyCode::Char('r'), true) => Key::CtrlR,
+        (KeyCode::Char('u'), true) => Key::CtrlU,
         (KeyCode::Char(c), false) => Key::Char(c),
         (KeyCode::Up, _) => Key::Up,
         (KeyCode::Down, _) => Key::Down,
+        (KeyCode::Left, _) => Key::Left,
+        (KeyCode::Right, _) => Key::Right,
         (KeyCode::Enter, _) => Key::Enter,
         (KeyCode::Esc, _) => Key::Esc,
         (KeyCode::Tab, _) => Key::Tab,
@@ -426,6 +429,8 @@ mod tests {
             (KeyCode::Char('s'), Key::Char('s')),
             (KeyCode::Up, Key::Up),
             (KeyCode::Down, Key::Down),
+            (KeyCode::Left, Key::Left),
+            (KeyCode::Right, Key::Right),
             (KeyCode::Enter, Key::Enter),
             (KeyCode::Esc, Key::Esc),
             (KeyCode::Tab, Key::Tab),
@@ -445,6 +450,7 @@ mod tests {
             ('s', Key::CtrlS),
             ('t', Key::CtrlT),
             ('r', Key::CtrlR),
+            ('u', Key::CtrlU),
         ];
 
         for (character, expected) in cases {

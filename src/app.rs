@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use crate::config::Config;
 use crate::events::{Action, Command, Event, Key, Stage};
-use crate::settings::SettingsForm;
+use crate::settings::{SettingsForm, THEME};
 
 pub const LOG_CAP: usize = 500;
 pub const RATE_WINDOW: usize = 20;
@@ -341,11 +341,25 @@ impl App {
                 self.settings.focus_next();
                 None
             }
-            Key::Backspace => {
+            Key::Left | Key::Char('h') if self.settings.focused == THEME => {
+                self.settings.select_theme_prev();
+                None
+            }
+            Key::Right | Key::Char('l') if self.settings.focused == THEME => {
+                self.settings.select_theme_next();
+                None
+            }
+            Key::Backspace if self.settings.focused < self.settings.fields.len() => {
                 self.settings.backspace();
                 None
             }
-            Key::Char(c) if !c.is_control() => {
+            Key::CtrlU if self.settings.focused < self.settings.fields.len() => {
+                self.settings.clear();
+                None
+            }
+            Key::Char(c)
+                if !c.is_control() && self.settings.focused < self.settings.fields.len() =>
+            {
                 self.settings.insert(c);
                 None
             }
@@ -462,7 +476,7 @@ fn timestamp() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::Config;
+    use crate::config::{Config, ThemeName};
     use crate::events::{Action, Command, Event, Key, Stage};
 
     fn config() -> Config {
@@ -673,6 +687,7 @@ mod tests {
         a.on_key(Key::Tab);
         a.on_key(Key::Tab);
         a.on_key(Key::Tab);
+        a.on_key(Key::Tab);
         a.on_key(Key::Char('!'));
         assert_eq!(
             a.settings.fields[crate::settings::LLM_MODEL].value,
@@ -819,8 +834,29 @@ mod tests {
     fn enter_on_last_field_saves() {
         let mut a = app();
         a.on_key(Key::Char('c'));
-        a.settings.focused = crate::settings::MAX_TOKENS;
+        a.settings.focused = crate::settings::THEME;
         assert!(matches!(a.on_key(Key::Enter), Some(Action::SaveConfig(_))));
+    }
+
+    #[test]
+    fn theme_selector_uses_horizontal_keys() {
+        let mut a = app();
+        a.on_key(Key::Char('c'));
+        a.settings.focused = crate::settings::THEME;
+        assert_eq!(a.settings.theme, ThemeName::Btop);
+        assert_eq!(a.on_key(Key::Right), None);
+        assert_eq!(a.settings.theme, ThemeName::Mono);
+        assert_eq!(a.on_key(Key::Char('h')), None);
+        assert_eq!(a.settings.theme, ThemeName::Btop);
+    }
+
+    #[test]
+    fn ctrl_u_clears_a_text_setting() {
+        let mut a = app();
+        a.on_key(Key::Char('c'));
+        a.settings.focused = crate::settings::PROMPT;
+        assert_eq!(a.on_key(Key::CtrlU), None);
+        assert!(a.settings.fields[crate::settings::PROMPT].value.is_empty());
     }
 
     #[test]

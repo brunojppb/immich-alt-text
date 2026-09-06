@@ -1,0 +1,14 @@
+---
+source: tests/ui_snapshots.rs
+expression: terminal.backend()
+---
+"╭ settings ────────────────────────────╮"
+"│  llm model          gem…             │"
+"│  prompt             Wri…             │"
+"│  llm timeout (s)    120              │"
+"│  workers            1                │"
+"│  retries            3                │"
+"│  max tokens         200              │"
+"│▸ theme              (●) btop   ( ) mo│"
+"│ ctrl-s save    ctrl-t test    ← → the│"
+"╰──────────────────────────────────────╯"

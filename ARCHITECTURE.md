@@ -231,7 +231,7 @@ Immich 401 and 403 responses are fatal and advise checking the key. HTTP 429, al
 
 [`LlmClient`](src/llm.rs#L22-L133) treats the configured base URL as the OpenAI-compatible API root. `ping` sends `GET {base}/models`. `describe` base64-encodes the preview into a `data:image/jpeg;base64,...` URL and sends one user message to `POST {base}/chat/completions`; the message content contains the configured prompt followed by an `image_url` part. The request includes the configured model and `max_tokens`.
 
-The response parser uses only the first choice's optional string `message.content`, trims surrounding whitespace, and rejects missing or blank output as permanent. There is no prompt postprocessing, output length check beyond the provider's token limit, content moderation layer, or fallback model. The default prompt asks for one or two plain descriptive sentences without preamble, quotes, or “This image shows”; `llm.prompt` is file-only and is passed verbatim.
+The response parser uses only the first choice's optional string `message.content`, trims surrounding whitespace, and rejects missing or blank output as permanent. There is no prompt postprocessing, output length check beyond the provider's token limit, content moderation layer, or fallback model. The default prompt asks for one or two plain descriptive sentences without preamble, quotes, or “This image shows”; `llm.prompt` is editable in the settings form and is passed verbatim.
 
 LLM 401 and 403 are fatal key failures. A 404 is also fatal because it usually indicates the base URL or model path is wrong. HTTP 429 and 5xx, transport failures, and timeouts are transient; other statuses and malformed/empty completion bodies are permanent.
 
@@ -255,13 +255,13 @@ All config structs use Serde defaults, so omitted sections or keys receive these
 | `llm.model` | empty | nonblank after trimming |
 | `llm.max_tokens` | `200` | at least 1 |
 | `llm.timeout_secs` | `120` | no additional range check |
-| `llm.prompt` | built-in alt-text prompt | no nonblank check; file-only |
+| `llm.prompt` | built-in alt-text prompt | no nonblank check; editable in settings |
 | `run.workers` | `1` | 1 through 64 |
 | `run.retries` | `3` | 0 through 10 |
 | `run.page_size` | `1000` | 1 through 1000; file-only |
-| `ui.theme` | `btop` | enum value `btop` or `mono`; file-only |
+| `ui.theme` | `btop` | enum value `btop` or `mono`; editable with a selector |
 
-`retries` and both timeouts are also file-only. The seven editable fields are Immich URL/key, LLM URL/key/model, workers, and max tokens. [`SettingsForm::to_config`](src/settings.rs#L97-L117) clones the committed config, overlays trimmed form values, parses the two numbers, and validates the result; this preserves all file-only values.
+`page_size` is the only file-only setting. The settings form also edits the prompt, both timeouts in seconds, retry count, and theme, alongside Immich URL/key, LLM URL/key/model, workers, and max tokens. [`SettingsForm::to_config`](src/settings.rs#L97-L117) clones the committed config, overlays trimmed form values, parses numeric fields, and validates the result. `ctrl-u` clears the focused text field, which makes replacing the long default prompt practical; the theme row uses left/right arrows or `h`/`l` and never accepts text input.
 
 [`config::save`](src/config.rs#L173-L215) validates before serialization, pretty-prints TOML, creates parent directories, and stages a uniquely named temporary file in the destination directory. The file is created exclusively and, on Unix, opened and explicitly set to mode `0600`. The implementation writes, flushes, calls `sync_all`, closes, and renames the temporary file over the destination. A guard removes an unpersisted temporary file on error. Same-directory rename gives atomic file replacement on supported filesystems and replaces a previously permissive file with an owner-only one. It does not fsync the parent directory, and non-Unix platforms do not receive a Unix permission guarantee.
 
@@ -301,7 +301,7 @@ A representative wide run screen (illustrative and abridged, not a literal snaps
 ╰──────────────────────────────────────────────────────────────────────╯
 ```
 
-The settings screen is a centered form, up to 78 columns wide. Focus is marked with `▸` and `▏`; test results and validation/save messages appear below the fields.
+The settings screen is a centered form, up to 78 columns wide. Focus is marked with `▸` and `▏`; test results and validation/save messages appear below the fields. On short terminals the content area scrolls to keep the focused row visible while the footer remains fixed. Text fields accept normal typing, backspace, and `ctrl-u`; the theme row is a compact two-option selector.
 
 ```text
 ╭ settings ────────────────────────────────────────────────────────────╮
