@@ -1,62 +1,77 @@
 # Architecture
 
-This document describes the implementation at the current `main` revision. It is a maintainer's map of the code that exists, including its concurrency and failure semantics; it is not a proposal for a future system.
+This document describes the code on the current `main` branch. It explains the main modules, the run lifecycle, concurrency, errors, configuration, the TUI, and the tests. It describes the current system. It is not a future design.
 
 ## Overview
 
-`immich-alt-text` is a foreground Rust terminal application. For each Immich image whose EXIF description is absent or blank, it downloads Immich's preview rendition and asks an OpenAI-compatible vision model for a short description. In normal mode it writes that text back to the asset; in dry-run mode it performs the same discovery and model work but skips the Immich update. Immich is the durable work ledger: a later normal run searches again and skips assets that already have nonblank descriptions. The application itself has no database, queue service, daemon, or background process.
+`immich-alt-text` is a Rust terminal application. It finds Immich images with no description. It downloads a preview image. It asks an OpenAI-compatible vision model for a description.
 
-The implementation separates four kinds of work:
+In normal mode, the application writes the description to Immich. In dry-run mode, it does not write to Immich. Both modes perform the search, preview download, and model request.
 
-- [`main`](src/main.rs#L35-L54) owns process concerns and side effects: CLI parsing, logging, terminal setup/restoration, keyboard input, the async event loop, connection-test tasks, runtime replacement, and shutdown.
-- [`App`](src/app.rs#L51-L75) is the in-memory UI state machine. `App::on_key` turns input into an [`Action`](src/events.rs#L100-L110), while `App::on_event` folds engine and connection-test events into renderable state. It performs no filesystem, terminal, network, or async I/O.
-- [`engine`](src/engine.rs#L42-L152) is the processing module. Its small external interface is `prepare`/`spawn`, `EngineHandle::send`, and the event receiver supplied by the caller; behind that interface it owns run control, discovery, worker coordination, retries, pause, cancellation, and terminal-event delivery.
-- [`ui`](src/ui/mod.rs#L14-L19) is a read-only projection of `App` and `Theme` onto a Ratatui frame. The run renderer never mutates application state; the settings renderer only updates a view-only prompt-width cache so keyboard navigation follows the current terminal width.
+Immich stores the progress. A later normal run searches again. It skips images that already have descriptions. The application has no database, queue service, daemon, or background process.
 
-The HTTP-specific implementations are kept in [`immich`](src/immich.rs#L46-L173) and [`llm`](src/llm.rs#L22-L133). Configuration serialization and validation live in [`config`](src/config.rs), editable settings-form state in [`settings`](src/settings.rs), and style selection in [`theme`](src/theme.rs).
+### Main modules
+
+- [`main`](src/main.rs) reads CLI options, loads the config, starts the terminal, runs the event loop, tests connections, replaces the runtime, and shuts down the application.
+- [`App`](src/app.rs) stores UI state in memory. `App::on_key` converts input into an [`Action`](src/events.rs). `App::on_event` applies engine and connection-test events. `App` does not perform file, terminal, network, or async I/O.
+- [`engine`](src/engine.rs) finds and processes assets. It controls workers, retries, pause, cancellation, and run events.
+- [`ui`](src/ui/mod.rs) reads `App` and `Theme` and draws the Ratatui frame. The renderers do not change application state, except for the prompt width value used by the settings form.
+- [`immich`](src/immich.rs) and [`llm`](src/llm.rs) contain the HTTP clients. [`config`](src/config.rs) contains config load, save, and validation. [`settings`](src/settings.rs) contains editable form state. [`theme`](src/theme.rs) contains display styles.
 
 ### Design goals
 
-- **Safe incremental operation.** Only assets blank at discovery time enter the queue. Each successful write is immediately durable in Immich, so quitting and rerunning naturally resumes by searching again.
-- **A responsive, observable foreground run.** Discovery and processing overlap, multiple assets may be processed concurrently, and bounded channels limit memory. Events expose page totals, per-asset stages, results, failures, and run completion to the TUI.
-- **Explicit failure scope.** Client errors are classified as transient, per-asset permanent, or run-fatal. Transient operations retry with bounded exponential backoff; an asset-local failure does not discard the rest of the queue.
-- **Predictable lifecycle behavior.** Commands are acknowledged, pause has a defined handoff point, cancelled runs stop producing new run events, and runtime replacement cannot overlap an old in-flight Immich write.
-- **Testability at real seams.** Pure state transitions, channel interfaces, HTTP endpoints, rendering backends, replacement preparation, and retry timing can be exercised without a real terminal, Immich installation, or LLM.
-- **Keep credentials out of routine output.** The TUI masks keys by default, request logging omits headers and bodies, malformed configuration is reported generically, and Unix persistence uses mode `0600`.
+- **Safe repeat runs.** Only images without descriptions enter the queue. Each successful write is saved in Immich. A later run can continue the work.
+- **A responsive run.** Discovery and processing run at the same time. Several workers can process assets. Bounded channels limit memory use.
+- **Clear error scope.** Errors can be temporary, asset-specific, or fatal for the run. Temporary errors use limited retries.
+- **Predictable lifecycle.** Commands have acknowledgements. Pause has a clear start boundary. Cancelled runs stop sending normal events. Runtime changes wait for old writes to finish.
+- **Useful tests.** The code has test points for state changes, channels, HTTP requests, rendering, config replacement, and retry timing.
+- **Safe routine output.** The TUI hides keys. Logs do not include request headers or bodies. Invalid config errors do not show file contents. Unix config files use mode `0600`.
 
-### Non-goals and limits
+### Limits
 
-This is not a library-wide asset synchronization system, a durable local job runner, or a server. It does not watch for new photos, run on a schedule, persist run telemetry, edit tags, generate releases, provide a background service, or maintain its own resume cursor. It uses chat completions only, does not stream model output, and does not validate the generated prose beyond requiring nonblank text. It also does not provide transactional compare-and-set updates in Immich: an asset that was blank when discovered is later updated with a normal `PUT`, so an external edit made between discovery and write can be overwritten.
+This application is not a general asset synchronization service. It does not:
+
+- watch for new photos;
+- run on a schedule;
+- store local run data;
+- edit tags;
+- create releases;
+- run as a background service; or
+- keep a local resume position.
+
+It uses chat completions only. It does not stream model output. It checks that the model returns nonblank text, but it does not check the writing style of that text.
+
+Immich updates are normal `PUT` requests. The application does not use a compare-and-set update. If another user changes an image after discovery and before the write, the application can replace that change.
 
 ## System context and module boundaries
 
 ```mermaid
 flowchart LR
-    User[User and terminal]
-    Main[main runtime]
-    App[App state machine]
-    UI[ui renderer]
-    Engine[engine]
-    Events[events types]
-    ImmichClient[Immich client]
-    LlmClient[LLM client]
+    User[User]
+    Main[Main]
+    App[App state]
+    UI[Terminal UI]
+    Engine[Engine]
+    Events[Events]
+    Immich[Immich client]
+    LLM[LLM client]
     ImmichServer[Immich server]
-    LlmServer[OpenAI compatible server]
-    Config[config and settings]
-    Theme[theme]
+    LLMServer[LLM server]
+    Config[Config]
+    Theme[Theme]
 
     User -->|keys| Main
-    Main -->|mapped Key| App
+    Main -->|Key| App
     App -->|Action| Main
     Main -->|Command| Engine
     Engine -->|Event| Main
     Main -->|Event| App
     Main -->|App and Theme| UI
     UI -->|frame| User
-    Engine --> ImmichClient
-    Engine --> LlmClient
-    ImmichClient -->|HTTP| ImmichServer
-    LlmClient -->|HTTP| LlmServer
+    Engine --> Immich
+    Engine --> LLM
+    Immich -->|HTTP| ImmichServer
+    LLM -->|HTTP| LLMServer
     Main --> Config
     App --> Config
     Main --> Theme
@@ -64,19 +79,35 @@ flowchart LR
     Events --- Engine
 ```
 
-[`events.rs`](src/events.rs) is the vocabulary shared across the main runtime, state machine, and engine. `Key` removes Crossterm types from `App`; `Action` describes side effects for `main`; `Command` is the engine control interface; and `Event` is the complete stream needed to update the UI. This keeps terminal and async details out of the state machine and keeps Ratatui details out of the engine.
+[`events.rs`](src/events.rs) defines the messages used by the main runtime, `App`, and the engine:
 
-The boundary is deliberately not a trait hierarchy. `Engine` contains concrete `ImmichClient` and `LlmClient` values, and both contain concrete `reqwest::Client`s. Variation for tests occurs through configured HTTP base URLs and Wiremock servers. This is a compact interface with less indirection, at the cost of making non-HTTP client substitution harder.
+- `Key` keeps Crossterm types out of `App`.
+- `Action` tells `main` which side effect to perform.
+- `Command` controls the engine.
+- `Event` contains the data needed by the UI.
 
-### `App` as the state owner
+This design keeps terminal and async code out of the state machine. It also keeps Ratatui code out of the engine.
 
-[`App::new`](src/app.rs#L77-L106) initializes screen, run telemetry, newest-first log, settings form, footer state, and a generation number for connection tests. The first-run flag chooses `Settings`; otherwise the initial screen is `Run`. [`App::on_key`](src/app.rs#L183-L192) and [`App::on_event`](src/app.rs#L108-L181) are the normal state-machine paths, supplemented by the explicit config-save callbacks. `main` has two exceptional direct mutations during setup/runtime coordination: it sets `app.settings.message` during startup/runtime setup and sets `app.run_state` plus `app.footer_message` when a command is requested without an active engine.
+The clients are concrete types. `Engine` stores an `ImmichClient` and an `LlmClient`. Each client stores a concrete `reqwest::Client`. Tests use local HTTP URLs and Wiremock servers. This keeps the production code small. It also makes client replacement less flexible.
 
-Run state is one of `Idle`, `Running`, `Paused`, `Finished`, or `Error(String)`. Engine events update cumulative discovery counts, the in-flight list, completion/failure counters, timing aggregates, and a log capped at 500 rows. A rolling window of at most 20 completion instants drives the displayed completion rate and ETA. Starting another run clears counters and timing but intentionally retains the log; successfully applying new settings resets telemetry to idle and also retains the log.
+### App state
 
-The state transition to `Running` or `Paused` happens immediately when the key is accepted, before the corresponding command acknowledgment returns. This makes the UI feel immediate, while the engine's acknowledgment protocol supplies the stronger concurrency guarantees described below.
+[`App::new`](src/app.rs) creates the screen, run counters, log, settings form, footer message, and connection-test generation number. The first-run flag selects the settings screen. Otherwise, the run screen is selected.
 
-## Process startup and terminal lifecycle
+`App::on_key` and `App::on_event` are the normal state update functions. Config save callbacks also update the state. `main` has two direct updates:
+
+1. It sets the startup message in the settings form.
+2. It sets the run state and footer message when no engine can receive a command.
+
+The run state is one of `Idle`, `Running`, `Paused`, `Finished`, or `Error(String)`.
+
+Engine events update discovery counts, active assets, done and failed counts, timing values, and the log. The log holds at most 500 rows. The rate and ETA use the last 20 completion times.
+
+Starting a new run clears counters and timing values. It keeps the log. A successful config save resets run data to idle and also keeps the log.
+
+The UI changes to `Running` or `Paused` as soon as it accepts the key. The engine then acknowledges the command. This makes the UI respond quickly while the acknowledgement gives the caller a clear completion point.
+
+## Startup and terminal lifecycle
 
 ```mermaid
 sequenceDiagram
@@ -87,50 +118,56 @@ sequenceDiagram
     participant Engine
     participant App
 
-    User->>Main: launch with optional --config
-    Main->>Main: initialize daily file logging
-    Main->>Config: load configuration
-    Config-->>Main: config or recoverable parse state
+    User->>Main: start with config options
+    Main->>Main: start file logging
+    Main->>Config: load config
+    Config-->>Main: config or recoverable error
     Main->>Main: install panic hook
-    Main->>Terminal: initialize raw TUI terminal
-    alt valid existing configuration
+    Main->>Terminal: start TUI
+    alt valid config
         Main->>Engine: prepare and start control loop
-        Main->>App: create Run screen
-    else missing invalid or malformed configuration
-        Main->>App: create Settings screen
+        Main->>App: show run screen
+    else setup needed
+        Main->>App: show settings screen
     end
-    loop until quit input or loop error
+    loop until quit
         Main->>Terminal: draw App
-        Main->>Main: await key event engine event test event or tick
-        Main->>App: apply Key or Event
+        Main->>Main: wait for key, event, test, or tick
+        Main->>App: apply key or event
         App-->>Main: optional Action
     end
-    Main->>Engine: cancel and await shutdown
+    Main->>Engine: cancel and wait
     Main->>Terminal: restore terminal
 ```
 
-[`main`](src/main.rs#L35-L54) parses one optional `--config` path, initializes nonblocking daily file logging under the XDG state directory, and loads the selected file. A missing file becomes `Config::default()` and enters setup because required fields do not validate. A syntactically valid file is also checked with `Config::validate`; invalid values enter setup with the loaded values available for correction. A TOML parse failure is recoverable but uses fresh defaults and a generic message so malformed file contents, which may include secrets, are not copied into the TUI. Other read errors terminate startup.
+[`main`](src/main.rs) accepts `--config` and `--dry-run`. It starts daily file logging under the XDG state directory. It loads the selected config file.
 
-The panic hook installed by [`install_panic_hook`](src/main.rs#L101-L108) restores the terminal before delegating to Rust's default panic hook. On the nonpanic path, `ratatui::restore()` runs after `run` returns, including when drawing or another loop operation returns an error. The panic hook is terminal hygiene, not graceful engine shutdown; ordinary loop exit uses the explicit shutdown path.
+If the file does not exist, the application uses default values and opens the settings screen. If the file is valid but fails validation, the application opens the settings screen with the loaded values. If TOML parsing fails, the application uses fresh defaults and shows a general error. It does not show file contents, because they can contain keys. Other read errors stop startup.
 
-When setup is required, no engine is created. Otherwise [`spawn_runtime`](src/main.rs#L180-L188) creates a bounded event channel of 1,024 messages, validates and constructs the engine, and starts its control loop. The `--dry-run` CLI option is a process-local override layered onto the saved config before engine construction; saving settings does not persist that override. Construction does not start an asset run; the engine remains idle until `Command::Start`.
+The panic hook restores the terminal before Rust prints the panic message. On normal exit, `ratatui::restore()` also runs when the event loop returns an error.
+
+When setup is needed, the application does not create an engine. Otherwise, [`spawn_runtime`](src/main.rs) creates an event channel with capacity 1,024, validates the config, and starts the engine control loop. The engine stays idle until `Command::Start`.
+
+The `--dry-run` flag is a process-local override. It changes the runtime config, but it does not change the saved config. A settings save can still change the saved dry-run value.
 
 ### Keyboard and event loop
 
-[`spawn_key_reader`](src/main.rs#L110-L135) runs Crossterm's blocking `poll`/`read` operations on a plain OS thread. It polls every 100 ms, accepts key-press events only, maps supported keys into the application-level `Key` enum, and forwards them through an unbounded channel. The short poll lets the thread notice a closed receiver and exit. Terminal resize and other Crossterm events are ignored.
+[`spawn_key_reader`](src/main.rs) runs Crossterm input on an OS thread. It checks for input every 100 ms. It accepts key-press events and maps them to the `Key` enum. It ignores resize and other terminal events.
 
-[`run`](src/main.rs#L208-L284) draws once at the top of every loop iteration, then `tokio::select!` waits for one of four sources:
+[`run`](src/main.rs) draws the screen at the start of each loop. It then waits for one of four sources:
 
 1. a mapped key;
-2. an event from the currently active engine runtime;
-3. a settings connection-test result; or
-4. a 250 ms interval tick.
+2. an engine event;
+3. a connection-test result; or
+4. a 250 ms timer tick.
 
-Keys and events cause a redraw on the next iteration. Ticks also redraw even when state has not changed, which advances elapsed durations, in-flight timers, rate/ETA presentation, and adapts the frame to a resized terminal. If the key channel closes, or `q`/`ctrl-c` requests quit, the loop ends. A closed or absent engine event receiver is converted to a pending future rather than causing a busy loop.
+Keys and events cause another draw. Timer ticks update elapsed time, active asset timers, rate, ETA, and terminal-size layout. A closed key channel, `q`, or `ctrl-c` ends the loop. If no engine event receiver exists, the loop waits without spinning.
 
-Connection tests are separate from the engine. `ctrl-t` validates the candidate form, aborts any previous test task, then [`test_connections`](src/main.rs#L343-L377) checks Immich's version endpoint and the LLM's models endpoint concurrently. Each side has an outer 10-second cap in addition to its configured HTTP timeout. A monotonically wrapping test ID makes late results harmless: `App` accepts only the current generation.
+Connection tests run outside the engine. `ctrl-t` validates the candidate settings and starts two checks at the same time. One check calls the Immich version endpoint. The other calls the LLM models endpoint. Each check has a 10-second outer limit. The configured HTTP timeout also applies.
 
-Before returning, the loop aborts a connection-test task and calls [`EngineHandle::shutdown`](src/engine.rs#L64-L71). Shutdown first cancels cooperatively and waits up to five seconds. If the control task is still alive, a separate force token causes worker tasks to be aborted, after which shutdown waits conclusively for the engine task. This cleanup also runs when the loop itself returns an error.
+The connection-test ID increases for each test. `App` ignores results from an older ID.
+
+Before exit, the loop stops the connection-test task and shuts down the engine. Shutdown first cancels the engine and waits up to five seconds. If the engine still runs, a force token stops its workers. The loop then waits for the engine task to finish.
 
 ## Run lifecycle and concurrency
 
@@ -138,67 +175,86 @@ Before returning, the loop aborts a connection-test task and calls [`EngineHandl
 stateDiagram-v2
     [*] --> Idle
     Idle --> Running: Start
-    Finished --> Running: Start new run
-    Error --> Running: Start fresh run
+    Finished --> Running: Start again
+    Error --> Running: Start again
     Running --> Paused: Pause acknowledged
     Paused --> Running: Resume
-    Running --> Finished: discovery and workers complete
-    Running --> Error: fatal client or discovery failure
-    Paused --> Error: in-flight work fails fatally
+    Running --> Finished: work complete
+    Running --> Error: fatal error
+    Paused --> Error: fatal error
 ```
 
-`RunState` has no `Stopping` variant. The diagram therefore shows only the application's actual run states; process shutdown and engine cancellation are a separate lifecycle that can begin from any state when the user quits or runtime replacement starts.
+The application has no `Stopping` state. Process shutdown is separate from the run state.
 
-`PreparedEngine` is validated and owns no tasks. Calling [`PreparedEngine::start`](src/engine.rs#L80-L98) creates a bounded 16-message control channel and spawns `control_loop`. Every [`EngineHandle::send`](src/engine.rs#L50-L62) includes a one-shot acknowledgment and waits for it; command receipt therefore has observable completion rather than fire-and-forget timing.
+`PreparedEngine` validates the config and owns no tasks. Its `start` method creates a control channel with capacity 16 and starts `control_loop`.
 
-Each accepted `Start` creates a [`Run`](src/engine.rs#L166-L174) with a child cancellation token, a separate cancellation token for terminal events, a fresh `watch<bool>` pause channel initially set to `false`, an `active` atomic, and a run task. A `Start` while an ordinary active run is still healthy is ignored but acknowledged. A completed or cancelled run is replaceable. If a cancelled run is still active—most importantly because an Immich `PUT` is in flight—the control loop waits for that task before starting its successor. If the previous run has already marked itself inactive but is blocked sending `RunFinished`, it is retired without blocking the new start; its terminal-event token is cancelled so the stale send can disappear.
+Each `EngineHandle::send` message includes a one-shot acknowledgement. The caller waits for that acknowledgement.
 
-[`Engine::run`](src/engine.rs#L321-L387) creates an asset channel sized to `workers * 4`, shares its receiver behind a short-held async mutex, and starts exactly `run.workers` worker tasks. Discovery runs concurrently with those workers. The queue bounds prefetched `Asset` values and backpressures discovery when consumers lag. Workers serialize only the act of receiving from the single receiver; preview, LLM, and write operations run independently after dequeue.
+Each accepted `Start` creates a new run with:
 
-[`discover`](src/engine.rs#L389-L452) requests newest-first image pages, adds every returned item to `scanned`, filters with `Asset::needs_description`, adds wanted assets to `queued`, emits cumulative `PageLoaded`, and sends wanted assets to the worker queue. It follows `nextPage` only when the parsed value is greater than the current page. Dropping the sender after discovery tells workers that no more assets remain. `DiscoveryDone` reports the final queue size. Once discovery and all workers finish, `active` is cleared *before* attempting `RunFinished`; this ordering keeps restart live even under event-channel backpressure.
+- a child cancellation token;
+- a token for terminal events;
+- a pause watch value;
+- an active flag; and
+- a run task.
 
-An asset's observable order in normal mode is:
+An active run ignores another `Start`. A completed or cancelled run can be replaced. If a cancelled run still has an active Immich write, the control loop waits for that task. This prevents old and new writes from overlapping.
 
-`AssetStarted` → `Fetching` → preview GET → `CallingLlm` → completion POST → `Writing` → description PUT → `AssetDone`.
+`Engine::run` starts `workers` worker tasks. It also starts discovery. The asset channel has a size of `workers * 4`. This limits the number of prefetched assets. Workers lock the receiver only while they receive an asset. Network requests run after they release the lock.
 
-In dry-run mode the `Writing` stage and description `PUT` are omitted; the
-preview and completion requests, generated description, completion event, and
-run counters remain the same.
+### Discovery
 
-Failures replace `AssetDone` with `AssetFailed`, unless the error is fatal or cancellation wins. Success and failure atomics supply the final `RunFinished` totals.
+`discover` requests image pages in newest-first order. It counts all returned images. It sends only images for which `Asset::needs_description` is true. It sends cumulative `PageLoaded` events. It follows `nextPage` only when the next value is greater than the current page.
 
-### Backpressure, pause, and cancellation
+When discovery ends, it drops the asset sender. This tells workers that no more assets are available. It sends `DiscoveryDone` with the final queue size.
 
-The main engine-event channel is bounded at 1,024 in production. All normal event sends await capacity and race cancellation with biased priority toward cancellation. This prevents an old run from hanging forever or publishing newly blocked nonterminal events after it has been cancelled. The channel is part of flow control: a stalled UI eventually slows workers and discovery rather than allowing telemetry to grow without bound.
+### One asset
 
-Pause is intentionally **admission control**, not suspension of HTTP calls already in progress. Workers check the pause watch before dequeue/admission. To close the race between dequeue and `AssetStarted`, a worker first reserves event capacity, then enters a shared `handoff` mutex, rechecks cancellation and pause, and publishes `AssetStarted` while holding that mutex. `Command::Pause` sets the watch value and acquires/releases the same mutex before acknowledging. Consequently, after the pause acknowledgment, no new asset can cross the started boundary—even with multiple workers or a saturated event channel. An asset already started may finish and emit stages/results while the UI says paused. `Resume` clears the watch flag; a fresh run never inherits an earlier run's paused state.
+In normal mode, the event order is:
 
-Run cancellation interrupts discovery, queue sends, pause waits, retry sleeps, preview requests, and LLM requests. Immich description writes use `cancel_in_flight = false`: once issued, a `PUT` is awaited rather than dropped. After it returns, cancellation prevents another retry or success event. This favors a known write outcome and prevents old/new runtime writes for the same asset from overlapping, but it can delay restart, replacement, or graceful shutdown until the HTTP request returns. Configured request timeouts bound normal HTTP waits; process shutdown adds the five-second force-abort escape hatch. Config replacement deliberately has no force timeout and waits for the write to return.
+`AssetStarted` -> `Fetching` -> preview GET -> `CallingLlm` -> completion POST -> `Writing` -> description PUT -> `AssetDone`.
 
-Fatal delivery uses a separate `terminal_cancel` token because the run token is cancelled before `Event::Fatal` is sent. Starting a successor cancels that terminal token, ensuring an old blocked fatal event cannot leak into the new run.
+In dry-run mode, the `Writing` stage and description `PUT` do not occur. The application still sends the preview request and the completion request. It still sends `AssetDone` with the generated text.
+
+Events from different assets can appear in any order. The final counters use atomic values.
+
+### Pause, cancellation, and backpressure
+
+The production event channel has capacity 1,024. Normal event sends wait for space. They also stop when the run is cancelled. A slow UI can slow discovery and workers, but it cannot make the event list grow without limit.
+
+Pause controls admission. It does not stop HTTP requests that already started. Workers check the pause value before they receive an asset. Before `AssetStarted`, a worker reserves event space and locks the handoff mutex. It checks cancellation and pause again. It then sends `AssetStarted`.
+
+`Command::Pause` sets the pause value and waits for the same mutex. After the pause acknowledgement, no new asset can start. An asset that already started can finish. `Resume` clears the pause value. A new run starts unpaused.
+
+Cancellation stops discovery, queue sends, pause waits, retry waits, preview requests, and LLM requests. The description `PUT` is different. Once it starts, the engine waits for its response. This gives a known write result and prevents overlapping replacement writes. It can delay replacement and normal shutdown until the HTTP timeout or response.
+
+The force path used by process shutdown can abort workers after five seconds. Config replacement waits for the write and has no separate force timeout.
+
+Fatal events use a separate terminal-event token. The run token is cancelled before the fatal event is sent. The separate token lets the event reach the UI. Starting a new run cancels the old terminal-event token.
 
 ### Retry and error scope
 
-[`retry`](src/engine.rs#L604-L657) makes `run.retries + 1` total attempts. Only `Transient` errors retry, with production delays of 2, 4, 8 seconds and so on (saturating arithmetic). `Permanent` and `Fatal` return immediately. Exhausted transient errors include the total try count in their message.
+`retry` makes `run.retries + 1` attempts. Only `Transient` errors are retried. The default delays are 2, 4, 8 seconds, and so on. `Permanent` and `Fatal` errors return at once. An exhausted transient error includes the number of attempts.
 
-During per-asset processing, transient exhaustion and permanent errors emit `AssetFailed` and the worker continues. Fatal errors cancel the entire run and emit `Fatal`. Discovery cannot sensibly continue without a valid page stream, so any final discovery error—fatal, permanent, or exhausted transient—stops the run.
+An asset-local error sends `AssetFailed`. The worker then processes another asset. A fatal error cancels the run and sends `Fatal`. A discovery error stops the run because the engine cannot trust the page stream.
 
-## External request flows
+## External requests
 
 ```mermaid
 flowchart TD
-    Search[POST Immich search metadata]
-    Filter{Description missing or blank}
-    Queue[Bounded asset queue]
-    Preview[GET Immich preview JPEG]
-    Encode[Base64 data URI]
-    Complete[POST LLM chat completions]
-    Text{First choice has nonblank text}
-    Write[PUT Immich asset description]
-    Done[AssetDone event]
-    Skip[Skip asset]
-    Fail[Classify and retry fail asset or fail run]
-    UI[App counters log and in-flight state]
+    Search[Search Immich]
+    Filter{Description missing?}
+    Queue[Asset queue]
+    Preview[Get preview]
+    Encode[Create image data]
+    Complete[Call LLM]
+    Text{Text is nonblank?}
+    DryRun{Dry run?}
+    Write[Update Immich description]
+    Done[AssetDone]
+    Skip[Skip image]
+    Fail[Send failure]
+    UI[Update UI]
 
     Search --> Filter
     Filter -->|no| Skip
@@ -207,87 +263,118 @@ flowchart TD
     Preview --> Encode
     Encode --> Complete
     Complete --> Text
-    Text -->|yes trim text| Write
     Text -->|no| Fail
+    Text -->|yes| DryRun
+    DryRun -->|yes| Done
+    DryRun -->|no| Write
     Write --> Done
-    Search -. PageLoaded .-> UI
-    Preview -. stages and errors .-> UI
-    Complete -. stages and errors .-> UI
-    Write -. result or error .-> UI
+    Search -.-> UI
+    Preview -.-> UI
+    Complete -.-> UI
+    Write -.-> UI
     Done --> UI
     Fail --> UI
 ```
 
-### Immich
+### Immich client
 
-[`ImmichClient`](src/immich.rs#L46-L173) strips a trailing slash, appends `/api`, and sends `x-api-key` on every request. It implements four operations:
+[`ImmichClient`](src/immich.rs) removes a trailing slash from the server URL. It adds `/api`. It sends `x-api-key` with each request.
 
-- `version`: `GET /api/server/version`, returning `vMAJOR.MINOR.PATCH` for connection testing;
-- `list_images`: `POST /api/search/metadata` with `type: IMAGE`, `withExif: true`, newest-first order, page, and size;
-- `preview_jpeg`: `GET /api/assets/{id}/thumbnail?size=preview`, rejecting an empty body; and
-- `set_description`: `PUT /api/assets/{id}` with `{ "description": text }`.
+It provides these operations:
 
-Missing EXIF data, `null` descriptions, and whitespace-only descriptions all need work. Search response decoding and malformed `nextPage` values are permanent errors. The client calls the response bytes a JPEG because it requests the preview rendition and the LLM data URI declares `image/jpeg`; it does not inspect or transcode the bytes.
+- `version`: `GET /api/server/version` for connection tests;
+- `list_images`: `POST /api/search/metadata` for newest-first image pages;
+- `preview_jpeg`: `GET /api/assets/{id}/thumbnail?size=preview`; and
+- `set_description`: `PUT /api/assets/{id}` with a JSON description.
 
-Immich 401 and 403 responses are fatal and advise checking the key. HTTP 429, all 5xx responses, transport failures, and timeouts are transient. Other non-success statuses are permanent. Request-construction and body-shape errors are permanent except client-construction failures, which are fatal.
+Missing EXIF data, `null` descriptions, and whitespace-only descriptions need a new description. The client treats invalid search data and invalid `nextPage` values as permanent errors.
 
-### LLM
+Status handling is:
 
-[`LlmClient`](src/llm.rs#L22-L133) treats the configured base URL as the OpenAI-compatible API root. `ping` sends `GET {base}/models`. `describe` base64-encodes the preview into a `data:image/jpeg;base64,...` URL and sends one user message to `POST {base}/chat/completions`; the message content contains the configured prompt followed by an `image_url` part. The request includes the configured model and `max_tokens`.
+- 401 and 403: fatal key errors;
+- 429 and 5xx: temporary errors;
+- transport errors and timeouts: temporary errors; and
+- other non-success statuses: permanent errors.
 
-The response parser uses only the first choice's optional string `message.content`, trims surrounding whitespace, and rejects missing or blank output as permanent. There is no prompt postprocessing, output length check beyond the provider's token limit, content moderation layer, or fallback model. The default prompt asks for one or two plain descriptive sentences without preamble, quotes, or “This image shows”; `llm.prompt` is editable in the settings form and is passed verbatim.
+Client construction errors are fatal. Request and response-shape errors are permanent.
 
-LLM 401 and 403 are fatal key failures. A 404 is also fatal because it usually indicates the base URL or model path is wrong. HTTP 429 and 5xx, transport failures, and timeouts are transient; other statuses and malformed/empty completion bodies are permanent.
+### LLM client
 
-### API keys and logging
+[`LlmClient`](src/llm.rs) treats the configured base URL as the API root. `ping` calls `GET /models`. `describe` calls `POST /chat/completions`.
 
-The Immich key is required by validation. The LLM key is optional; when empty, `LlmClient::authorize` omits the `Authorization` header, supporting local unauthenticated servers. When present, it uses `Authorization: Bearer ...`. Keys remain in process memory and are persisted as plaintext TOML; there is no keychain integration or encryption.
+The request contains the prompt and a base64 JPEG data URL. It also contains the model and `max_tokens` values.
 
-The settings form marks both key fields secret and renders one bullet per character until `ctrl-r` reveals them. HTTP debug logs contain method, URL path, status, and elapsed milliseconds, but not query bodies, headers, full URLs, prompts, images, descriptions, or keys. Unix config writes use owner-only permissions as a compensating control.
+The response parser reads only the first choice. It trims the text. Missing or blank text is a permanent error. The application does not edit the prompt, check the output length, moderate the text, or use a fallback model.
 
-## Configuration, settings, and replacement
+LLM status handling is:
 
-All config structs use Serde defaults, so omitted sections or keys receive these values:
+- 401 and 403: fatal key errors;
+- 404: fatal URL or model-path error;
+- 429 and 5xx: temporary errors;
+- transport errors and timeouts: temporary errors; and
+- other statuses and malformed responses: permanent errors.
 
-| Setting | Default | Validation / behavior |
+### API keys and logs
+
+The Immich key is required. The LLM key is optional. If it is empty, the LLM client sends no `Authorization` header. If it is present, the client sends a Bearer token.
+
+Keys stay in memory. The config file stores them as plain text. The settings screen hides keys until the user presses `ctrl-r`. Logs include the method, path, status, and duration. Logs do not include headers, bodies, prompts, images, descriptions, or keys.
+
+On Unix, config files use mode `0600`.
+
+## Config, settings, and runtime replacement
+
+Serde defaults fill missing sections and keys.
+
+| Setting | Default | Rule |
 | --- | --- | --- |
-| `immich.url` | empty | parseable `http` or `https` URL |
-| `immich.api_key` | empty | nonblank after trimming |
-| `immich.timeout_secs` | `30` | no additional range check |
-| `llm.base_url` | `http://localhost:1234/v1` | parseable `http` or `https` URL |
+| `immich.url` | empty | must use `http` or `https` |
+| `immich.api_key` | empty | must not be blank |
+| `immich.timeout_secs` | `30` | no extra range check |
+| `llm.base_url` | `http://localhost:1234/v1` | must use `http` or `https` |
 | `llm.api_key` | empty | optional |
-| `llm.model` | empty | nonblank after trimming |
-| `llm.max_tokens` | `200` | at least 1 |
-| `llm.timeout_secs` | `120` | no additional range check |
-| `llm.prompt` | built-in alt-text prompt | no nonblank check; editable in settings |
+| `llm.model` | empty | must not be blank |
+| `llm.max_tokens` | `200` | must be at least 1 |
+| `llm.timeout_secs` | `120` | no extra range check |
+| `llm.prompt` | built-in prompt | editable in settings |
 | `run.workers` | `1` | 1 through 64 |
 | `run.retries` | `3` | 0 through 10 |
-| `run.page_size` | `1000` | 1 through 1000; file-only |
-| `run.dry_run` | `false` | skips description updates when true; also available as the one-shot `--dry-run` CLI override |
-| `ui.theme` | `btop` | enum value `btop` or `mono`; editable with a selector |
+| `run.page_size` | `1000` | 1 through 1000, file only |
+| `run.dry_run` | `false` | skips description updates when true |
+| `ui.theme` | `btop` | `btop` or `mono` |
 
-`page_size` is the only file-only setting. The settings form also edits the prompt, both timeouts in seconds, retry count, dry-run mode, and theme, alongside Immich URL/key, LLM URL/key/model, workers, and max tokens. [`SettingsForm::to_config`](src/settings.rs#L97-L117) clones the committed config, overlays trimmed form values, parses numeric fields, and validates the result. `ctrl-u` clears the focused text field, which makes replacing the long default prompt practical; the theme and dry-run rows use left/right arrows or `h`/`l` and never accept text input.
+The settings form edits the prompt, timeouts, retry count, dry-run value, theme, URLs, keys, model, workers, and max tokens. `page_size` is file-only.
 
-[`config::save`](src/config.rs#L173-L215) validates before serialization, pretty-prints TOML, creates parent directories, and stages a uniquely named temporary file in the destination directory. The file is created exclusively and, on Unix, opened and explicitly set to mode `0600`. The implementation writes, flushes, calls `sync_all`, closes, and renames the temporary file over the destination. A guard removes an unpersisted temporary file on error. Same-directory rename gives atomic file replacement on supported filesystems and replaces a previously permissive file with an owner-only one. It does not fsync the parent directory, and non-Unix platforms do not receive a Unix permission guarantee.
+[`SettingsForm::to_config`](src/settings.rs) clones the saved config. It then adds the form values, parses numbers, and validates the result. `ctrl-u` clears a focused text field. The theme and dry-run rows use the left and right arrow keys or `h` and `l`.
 
-Saving through the TUI is a small transaction coordinated by [`apply_saved_config_with`](src/main.rs#L299-L331):
+[`config::save`](src/config.rs) validates the config before it writes. It creates parent directories. It writes a unique temporary file in the same directory. It flushes and syncs the file. It then renames the file over the old config. A cleanup guard removes a temporary file when a save fails.
 
-1. prepare and validate an inert replacement engine;
-2. persist the candidate config;
-3. take the old runtime and wait for `shutdown_for_replacement`;
-4. start the replacement, switch theme, and commit the candidate into `App`.
+Saving settings uses this order:
 
-If preparation or persistence fails, the old config, engine, theme, run state, telemetry, and edited candidate remain intact. Saving while `Running` is refused; the user must pause first. A successful save from paused state terminates the old run, resets run telemetry to idle, keeps the log, and returns to the run screen. Replacing the entire `EngineRuntime` also drops its old event receiver, so already-queued old events cannot mutate the reset `App`.
+1. Prepare and validate a new engine.
+2. Save the candidate config.
+3. Stop the old runtime and wait for it.
+4. Start the new runtime.
+5. Change the theme and commit the config in `App`.
 
-## TUI layout and interaction
+If preparation or saving fails, the old config and runtime stay active. The edited values stay in the form. Saving while a run is active is not allowed. The user must pause the run first.
 
-[`ui::render`](src/ui/mod.rs#L14-L19) dispatches solely on `App.screen`. Width-aware truncation counts terminal cells rather than Unicode scalar values. The run screen has three layout modes:
+After a successful save, a paused run stops. Run data resets to idle. The log stays in place. The old event receiver is dropped. Old queued events cannot change the new `App` state.
 
-- When the inner height is 8 rows or less (normally a terminal height of 10 or less), [`render_tiny`](src/ui/run.rs#L365-L385) shows only the outer header, progress bar/count, and footer.
-- At widths below 80 columns, progress and counters stack vertically. At 80 or more they sit side by side; widths below 100 use a 50/50 split and wider screens use 55/45.
-- The in-flight panel appears only at terminal heights of at least 24. Its height is `workers + 2`, allowing one row per configured worker. The remaining space belongs to the newest-first result log.
+## TUI layout and controls
 
-A representative wide run screen (illustrative and abridged, not a literal snapshot rendering) is:
+[`ui::render`](src/ui/mod.rs) selects the run or settings screen. Width-aware truncation counts terminal cells, not only Unicode characters.
+
+The run screen has these layout rules:
+
+- At a terminal height of 10 or less, it shows the header, progress bar, and footer.
+- Below 80 columns, progress and counters stack.
+- At 80 columns or more, progress and counters are side by side.
+- The in-flight panel appears at a terminal height of 24 or more.
+- The in-flight panel has `workers + 2` rows.
+- The remaining space shows the newest result log.
+
+A wide run screen looks like this:
 
 ```text
 ╭ immich-alt-text ─ photos.home.lan ─ model @ localhost:1234 ─ RUNNING ╮
@@ -306,7 +393,9 @@ A representative wide run screen (illustrative and abridged, not a literal snaps
 ╰──────────────────────────────────────────────────────────────────────╯
 ```
 
-The settings screen is a centered form, up to 78 columns wide. Focus is marked with `▸` and `▏`; test results and validation/save messages appear below the fields. On short terminals the content area scrolls to keep the focused row visible while the footer remains fixed. Text fields accept normal typing, backspace, and `ctrl-u`; the theme row is a compact two-option selector.
+The settings screen is a centered form with a maximum width of 78 columns. `▸` and `▏` mark focus. Test results and save messages appear below the form. Short terminals scroll the form to keep the focused row visible. The footer stays fixed.
+
+Text fields accept typing, backspace, and `ctrl-u`. The theme and dry-run rows are two-option selectors.
 
 ```text
 ╭ settings ────────────────────────────────────────────────────────────╮
@@ -317,44 +406,69 @@ The settings screen is a centered form, up to 78 columns wide. Focus is marked w
 │                     Avoid speculation and do not add a preamble.▏    │
 │  llm timeout (s)    120                                              │
 │  theme              (●) btop   ( ) mono                              │
+│  dry run            (●) off   ( ) on                                 │
 │  ctrl-t test connections   immich ✓ v3.1.0   llm ✓ 200 OK             │
-│ ctrl-s save    ctrl-t test    ← → theme    ctrl-u clear    esc back  │
+│ ctrl-s save    ctrl-t test    ← → select    ctrl-u clear    esc back  │
 ╰──────────────────────────────────────────────────────────────────────╯
 ```
 
-Run-screen controls are `s` to start from idle/finished/error, `p` to pause or resume, arrows to move the log selection, `enter` to open the selected row's full description/error popup, `c` to open settings, and `q` to quit. `esc` or `enter` closes the popup; other run keys are ignored while it is open, except global `ctrl-c`.
+Run controls are:
 
-Settings controls are `tab`/`shift-tab` to wrap focus, `enter` to advance (or save on the last field), normal characters and backspace to edit, and `ctrl-u` to clear a text field. While the prompt is focused, arrows move its cursor and `enter` inserts a line break. `ctrl-r` reveals/masks both keys, `ctrl-t` tests, `ctrl-s` saves, and `esc` returns without committing edits. `ctrl-c` quits from either screen. Settings may be viewed and tested during a run, but saving requires the run to be paused.
+- `s` starts a run from idle, finished, or error.
+- `p` pauses or resumes a run.
+- The arrow keys move through the log.
+- `enter` opens the selected result or error.
+- `c` opens settings.
+- `q` quits.
+- `esc` or `enter` closes the result popup.
 
-[`Theme`](src/theme.rs#L7-L98) centralizes semantic styles rather than scattering colors through renderers. `btop` uses reverse video for selection; indexed colors apply to the semantic styles for success, error, warning, information, accent, names, durations, dim text, and borders. It also renders a green-to-yellow-to-red progress gradient. `mono` removes colors while retaining bold titles/accents, dim secondary text, and reversed selection. Run-state labels use success for running, warning for paused, error for error, and information for idle/finished.
+Other run keys do nothing while the popup is open. `ctrl-c` always quits.
 
-## Important invariants and tradeoffs
+Settings controls are:
 
-- **`App` normally changes through explicit state-machine entry points.** `App::on_key` and `App::on_event` are the normal paths; renderers are pure and engine tasks never share `App`. The two `main` exceptions are the direct setup/runtime assignment to `app.settings.message` and the no-engine command fallback, which assigns `app.run_state` and `app.footer_message`.
-- **An `AssetStarted` event is the pause handoff boundary.** Once pause is acknowledged, no additional asset starts, although admitted work can complete.
-- **At most `workers` assets are actively processing.** The `workers * 4` queue may hold additional discovered assets, but it does not represent active HTTP pipelines.
-- **Per-asset stages are ordered.** Across assets, events may interleave freely. Counters are cumulative and use saturating/atomic updates where concurrency matters.
-- **Normal events are backpressured and cancellation-aware.** This bounds memory and suppresses stale post-cancellation sends, but UI stalls can slow actual processing.
-- **Immich writes are protected from cooperative mid-request cancellation.** This prevents ambiguous overlapping replacement writes, at the cost of potentially slower pause-independent restart/replacement/shutdown.
-- **Fatal is terminal for one run, not for the process.** `App` enters `Error`, and `s` can create a fresh run with fresh pause/cancellation state.
-- **Config application is commit-late in memory.** The UI adopts a candidate only after engine preparation and persistence succeed. Runtime replacement then waits conclusively for the old engine, favoring write safety over instant reconfiguration.
-- **Immich is the resume mechanism.** This is simple and durable, but every run rescans pages and there is no snapshot isolation between search and update.
-- **The clients expose only the protocol subset needed by this app.** This keeps them small, but provider-specific deviations from Immich or OpenAI-compatible shapes require code changes.
-- **Credential protection is pragmatic, not absolute.** Masking, narrow logs, and Unix `0600` reduce accidental disclosure; keys are still plaintext on disk and strings in memory.
-- **Wall-clock presentation is partly injectable.** Rendering and rate/ETA helpers accept `Instant`, while event timestamps and completion instants are captured internally. Tests can make screens deterministic by constructing `App`, but there is no general clock interface.
+- `tab` and `shift-tab` move through the fields.
+- `enter` moves to the next field. On the last field, it saves.
+- Normal characters and backspace edit text fields.
+- `ctrl-u` clears a text field.
+- Arrow keys move the prompt cursor when the prompt has focus.
+- `enter` adds a line break in the prompt.
+- `ctrl-r` shows or hides both keys.
+- `ctrl-t` tests both connections.
+- `ctrl-s` saves.
+- `esc` returns without saving.
+- `ctrl-c` quits.
 
-## Testing architecture
+Users can view and test settings during a run. They must pause the run before they save settings.
 
-The tests follow the module seams rather than relying on end-to-end terminal automation.
+[`Theme`](src/theme.rs) provides the styles used by all renderers. `btop` uses colors and reverse video for selection. `mono` removes colors but keeps bold titles, dim text, and selection. The progress bar uses a green to yellow to red gradient. Run states use success, warning, error, or information styles.
 
-**Inline unit tests.** [`app.rs` tests](src/app.rs#L463-L883) exercise event folding, counters, timing, state transitions, keyboard behavior, log capping/selection, save commit/failure behavior, and stale connection-test suppression. [`config.rs` tests](src/config.rs#L353-L594) cover defaults, validation, TOML round trips, failure-safe save checkpoints, same-directory staging, temporary-file cleanup, and Unix permissions. [`settings.rs` tests](src/settings.rs#L120-L202), [`theme.rs` tests](src/theme.rs#L100-L173), and [`ui/mod.rs` tests](src/ui/mod.rs#L72-L96) verify form conversion/masking, semantic styles, formatting, and cell-aware truncation. Binary-local [`main.rs` tests](src/main.rs#L380-L658) cover terminal-key mapping, malformed-config recovery, config replacement rollback, event-receiver replacement, and shutdown on loop error.
+## Important rules and tradeoffs
 
-**Wiremock client tests.** The tests beside [`ImmichClient`](src/immich.rs#L226-L495) and [`LlmClient`](src/llm.rs#L176-L410) start local Wiremock servers and assert exact methods, paths, query parameters, JSON bodies, and authentication headers. They also pin response parsing and the transient/permanent/fatal status matrix, including timeouts and malformed bodies. These are protocol tests without external network dependencies.
+- `App::on_key` and `App::on_event` are the normal state update functions. Renderers only read state. Engine tasks never share `App`.
+- `AssetStarted` is the pause boundary. After pause acknowledgement, no new asset starts. Work that already started can finish.
+- At most `workers` assets actively use the HTTP pipeline. The queue can hold more discovered assets.
+- Stages for one asset stay in order. Events from different assets can mix.
+- Normal events use bounded channels and observe cancellation. This limits memory use but lets a slow UI slow the run.
+- Immich writes wait for a response after the request starts. This protects write order but can delay replacement and shutdown.
+- A fatal error stops one run. It does not stop the process. The user can press `s` to start a new run.
+- The UI commits a new config only after engine preparation and file save succeed. Runtime replacement waits for the old engine.
+- Immich provides the resume behavior. Each run scans the pages again. There is no snapshot isolation between search and update.
+- The clients support only the protocol needed by this application. Provider differences can require code changes.
+- Key masking, limited logs, and Unix mode `0600` reduce accidental exposure. Keys remain plain text on disk and strings in memory.
+- Tests can control rendering time with `Instant`. Event timestamps and completion times are captured by the application. There is no general clock object.
 
-**Engine integration tests.** [`tests/engine_test.rs`](tests/engine_test.rs) composes two Wiremock servers with real clients, the real engine, and bounded Tokio channels. Straight-line tests verify blank-description filtering, writes, stage order, pagination, retries, and continuation after asset failure. Concurrency regressions use delayed and gated responders to verify multiworker pause handoff, immediate pause, saturated event channels, cancellation without late events, fatal cancellation during another worker's write, restart after fatal/finish, conclusive shutdown, and nonoverlapping restart/replacement writes. `EngineOptions::backoff_base` is the intentional timing seam that keeps retry tests fast.
+## Test structure
 
-**Snapshot tests.** [`tests/ui_snapshots.rs`](tests/ui_snapshots.rs) builds deterministic `App` values, supplies a fixed `Instant`, renders through Ratatui's `TestBackend`, and uses Insta snapshots. The checked sizes cover wide (`120x40`), boundary side-by-side (`80x24`), tiny (`40x10`), idle/error/popup states, and settings with results/errors. A direct `79x23` assertion covers the stacked/no-in-flight breakpoint without another snapshot. Snapshot artifacts live under [`tests/snapshots`](tests/snapshots/).
+Tests follow the module boundaries. They do not depend on terminal automation.
 
-**Manual fake environment.** [`examples/fake_servers.rs`](examples/fake_servers.rs) runs local Immich and LLM Wiremock servers, creates 40 representative assets, delays completions so in-flight state is visible, injects several write failures, and writes `target/demo-config.toml`. It is a manual TUI demonstration and smoke-test fixture, not a production server.
+**Unit tests.** Tests in [`app.rs`](src/app.rs), [`config.rs`](src/config.rs), [`settings.rs`](src/settings.rs), [`theme.rs`](src/theme.rs), and [`ui/mod.rs`](src/ui/mod.rs) cover state changes, config rules, form edits, styles, formatting, and Unicode cell widths. Tests in [`main.rs`](src/main.rs) cover key mapping, config recovery, runtime replacement, and shutdown.
 
-The strongest seams are the `Command`/`Event` channels, pure `App` transitions, HTTP URLs, Ratatui backend, candidate-runtime preparation closure, and retry options. There is deliberately no mock-client trait or fully abstract clock. Maintainers changing concurrency should favor the gated engine tests; changing HTTP shape should start with client Wiremock tests; changing layout or semantic presentation should update assertions and snapshots only after inspecting the rendered diff.
+**HTTP client tests.** Tests beside [`ImmichClient`](src/immich.rs) and [`LlmClient`](src/llm.rs) use local Wiremock servers. They check methods, paths, query values, JSON bodies, headers, response parsing, timeouts, and temporary, permanent, and fatal errors.
+
+**Engine tests.** [`tests/engine_test.rs`](tests/engine_test.rs) uses real clients, the real engine, local Wiremock servers, and bounded Tokio channels. The tests cover filtering, writes, dry-run mode, stage order, page handling, retries, asset failures, pause, cancellation, fatal errors, restart, shutdown, and replacement writes.
+
+**Snapshot tests.** [`tests/ui_snapshots.rs`](tests/ui_snapshots.rs) creates fixed `App` values and a fixed `Instant`. It renders with Ratatui's `TestBackend` and uses Insta snapshots. The tests cover wide, side-by-side, stacked, tiny, idle, error, popup, and settings screens. Snapshot files are in [`tests/snapshots`](tests/snapshots/).
+
+**Fake environment.** [`examples/fake_servers.rs`](examples/fake_servers.rs) starts local Immich and LLM Wiremock servers. It creates 40 sample assets, delays completions, adds write failures, and writes `target/demo-config.toml`. It is for manual TUI testing.
+
+When you change concurrency, start with the engine tests. When you change an HTTP request, start with the client tests. When you change the UI, inspect the snapshot diff before you accept it.
