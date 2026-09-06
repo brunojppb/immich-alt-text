@@ -2,7 +2,7 @@ use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
 use immich_alt_text::app::{App, InFlight, LogRow, RunState, Screen};
-use immich_alt_text::config::Config;
+use immich_alt_text::config::{Config, ThemeName};
 use immich_alt_text::events::Stage;
 use immich_alt_text::theme::Theme;
 use immich_alt_text::ui;
@@ -158,6 +158,50 @@ fn settings_screen_with_error_message() {
     app.settings.show_secrets = true;
     app.settings.message = Some("invalid config: run.workers must be at least 1".into());
     snapshot("settings_error_100x30", 100, 30, &app, now);
+}
+
+#[test]
+fn settings_screen_mono_theme_selection() {
+    let now = Instant::now();
+    let mut app = App::new(config(), true);
+    app.settings.focused = immich_alt_text::settings::THEME;
+    app.settings.theme = ThemeName::Mono;
+    snapshot("settings_mono_100x30", 100, 30, &app, now);
+}
+
+#[test]
+fn settings_screen_prompt_editor() {
+    let now = Instant::now();
+    let mut app = App::new(config(), true);
+    app.settings.focused = immich_alt_text::settings::PROMPT;
+    snapshot("settings_prompt_80x24", 80, 24, &app, now);
+}
+
+#[test]
+fn settings_screen_prompt_editor_scrolls_long_prompts() {
+    let now = Instant::now();
+    let mut app = App::new(config(), true);
+    app.settings.focused = immich_alt_text::settings::PROMPT;
+    app.settings.fields[immich_alt_text::settings::PROMPT].value =
+        "one\ntwo\nthree\nfour\nfive".into();
+    app.settings.prompt_cursor = app.settings.fields[immich_alt_text::settings::PROMPT]
+        .value
+        .chars()
+        .count();
+    let rendered = render_to_string(80, 24, &app, now);
+    assert!(rendered.contains("two"));
+    assert!(!rendered.contains("one"));
+    snapshot("settings_prompt_scroll_80x24", 80, 24, &app, now);
+}
+
+#[test]
+fn settings_screen_tiny_keeps_the_focused_row_visible() {
+    let now = Instant::now();
+    let mut app = App::new(config(), true);
+    app.settings.focused = immich_alt_text::settings::THEME;
+    let rendered = render_to_string(40, 10, &app, now);
+    assert!(rendered.contains("theme"));
+    snapshot("settings_tiny_40x10", 40, 10, &app, now);
 }
 
 fn render_to_string(width: u16, height: u16, app: &App, now: Instant) -> String {
