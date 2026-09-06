@@ -3,9 +3,6 @@
 `immich-alt-text` is a terminal application for Immich. It uses a vision model
 to create descriptions for images that do not have descriptions.
 
-This guide uses ASD-STE100 principles. It uses short sentences, common words,
-and direct instructions.
-
 ![immich-alt-text running in the terminal](tui.jpg)
 
 The application uses Rust and [Ratatui](https://ratatui.rs). It is a personal
