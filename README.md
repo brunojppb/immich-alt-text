@@ -1,13 +1,10 @@
 # immich-alt-text
 
-`immich-alt-text` is a terminal application for Immich. It uses a vision model
-to create descriptions for images that do not have descriptions.
+`immich-alt-text` is a terminal application for Immich. It uses a vision model to create descriptions for images that do not have descriptions.
 
 ![immich-alt-text running in the terminal](tui.jpg)
 
-The application uses Rust and [Ratatui](https://ratatui.rs). It is a personal
-and experimental project. For the internal design, see
-[ARCHITECTURE.md](ARCHITECTURE.md).
+The application uses Rust and [Ratatui](https://ratatui.rs). It is a personal and experimental project. For the internal design, see [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ## What it does
 
@@ -18,26 +15,22 @@ For each image without a description, the application:
 3. Sends the image to an OpenAI-compatible vision model.
 4. Writes the returned description to Immich.
 
-The application does not change images that already have descriptions.
-Immich stores the progress. You can stop a run and start it again later.
+The application does not change images that already have descriptions. Immich stores the progress. You can stop a run and start it again later.
 
 ### Dry-run mode
 
-Dry-run mode performs the same search, download, and model requests. It does
-not update image descriptions in Immich.
+Dry-run mode performs the same search, download, and model requests. It does not update image descriptions in Immich.
 
 You can enable dry-run mode in either way:
 
 - Start the application with `--dry-run`.
 - Set `dry_run = true` in the settings screen.
 
-The CLI flag applies only to the current run. It overrides the saved setting.
-The settings value is saved for future runs.
+The CLI flag applies only to the current run. It overrides the saved setting. The settings value is saved for future runs.
 
 ## Requirements
 
-- Rust 1.98 or newer when you build from source. The repository defines the
-  development toolchain in `rust-toolchain.toml`.
+- Rust 1.98 or newer when you build from source. The repository defines the development toolchain in `rust-toolchain.toml`.
 - An Immich server and an API key.
 - A vision model that supports an OpenAI-compatible API.
 
@@ -49,18 +42,13 @@ For normal mode, use an Immich API key with these permissions:
 
 Dry-run mode does not need `asset.update`.
 
-The server-version check does not need another permission. Older Immich
-versions may not support these permissions. On those versions, use a full
-access API key.
+The server-version check does not need another permission. Older Immich versions may not support these permissions. On those versions, use a full access API key.
 
-The application was tested with LM Studio at
-`http://localhost:1234/v1`. Ollama, llama.cpp server, vLLM, OpenRouter, and
-OpenAI can use the same setting.
+The application was tested with LM Studio at `http://localhost:1234/v1`. Ollama, llama.cpp server, vLLM, OpenRouter, and OpenAI can use the same setting.
 
 ## Install a pre-built binary
 
-The installer downloads the latest release for your platform. It checks the
-SHA-256 checksum. It installs `immich-alt-text` in `~/.local/bin` by default.
+The installer downloads the latest release for your platform. It checks the SHA-256 checksum. It installs `immich-alt-text` in `~/.local/bin` by default.
 
 | Platform | Architecture | Release target |
 | --- | --- | --- |
@@ -88,8 +76,7 @@ To use another directory, set `INSTALL_DIR`:
 INSTALL_DIR="$HOME/bin" sh install.sh
 ```
 
-The installer creates the directory when needed. It never runs `sudo`. It
-prints a PATH message when the directory is not on your PATH.
+The installer creates the directory when needed. It never runs `sudo`. It prints a PATH message when the directory is not on your PATH.
 
 ### Build from source
 
@@ -118,10 +105,7 @@ The first launch opens the settings screen. Enter these values:
 - LLM base URL
 - Model name
 
-Press `ctrl-t` to test both connections. Press `ctrl-s` to save the settings.
-The application saves them to
-`~/.config/immich-alt-text/config.toml` and opens the run screen. Press `s` to
-start a run.
+Press `ctrl-t` to test both connections. Press `ctrl-s` to save the settings. The application saves them to `~/.config/immich-alt-text/config.toml` and opens the run screen. Press `s` to start a run.
 
 You can pass another config file:
 
@@ -178,20 +162,15 @@ dry_run = false         # do not update Immich when true
 theme = "btop"          # or "mono"
 ```
 
-`page_size` is file-only. The settings screen also lets you change the prompt,
-Immich and LLM timeouts, retry count, dry-run mode, and UI theme.
+`page_size` is file-only. The settings screen also lets you change the prompt, Immich and LLM timeouts, retry count, dry-run mode, and UI theme.
 
-The prompt editor supports multiple lines. Use the arrow keys to move in the
-prompt. Press `enter` to add a line break. Press `ctrl-u` to replace the
-prompt.
+The prompt editor supports multiple lines. Use the arrow keys to move in the prompt. Press `enter` to add a line break. Press `ctrl-u` to replace the prompt.
 
 ## Logs
 
-The application writes daily UTC logs to
-`~/.local/state/immich-alt-text/debug.log.YYYY-MM-DD`.
+The application writes daily UTC logs to `~/.local/state/immich-alt-text/debug.log.YYYY-MM-DD`.
 
-Set `RUST_LOG=debug` for more detail. The logs never contain request bodies or
-API keys.
+Set `RUST_LOG=debug` for more detail. The logs never contain request bodies or API keys.
 
 ## Try it without a real library
 
@@ -218,10 +197,6 @@ cargo clippy --all-targets -- -D warnings
 
 ### Releases
 
-Releases are published only when a maintainer starts the release workflow
-from `main` with a version.
+Releases are published only when a maintainer starts the release workflow from `main` with a version.
 
-Pull requests, pushes, and tag creation do not publish a release. The
-workflow updates the Cargo package version, creates the `v<version>` tag,
-builds the three supported archives, and publishes them to GitHub Releases.
-It also publishes matching `.sha256` files and release notes.
+Pull requests, pushes, and tag creation do not publish a release. The workflow updates the Cargo package version, creates the `v<version>` tag, builds the three supported archives, and publishes them to GitHub Releases. It also publishes matching `.sha256` files and release notes.
