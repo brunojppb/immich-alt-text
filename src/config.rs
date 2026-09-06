@@ -74,6 +74,7 @@ pub struct RunConfig {
     pub workers: usize,
     pub retries: u32,
     pub page_size: u32,
+    pub dry_run: bool,
 }
 
 impl Default for RunConfig {
@@ -82,6 +83,7 @@ impl Default for RunConfig {
             workers: 1,
             retries: 3,
             page_size: 1000,
+            dry_run: false,
         }
     }
 }
@@ -392,6 +394,7 @@ mod tests {
                 workers: 2,
                 retries: 3,
                 page_size: 500,
+                dry_run: false,
             },
             ui: UiConfig {
                 theme: ThemeName::Mono,
@@ -532,6 +535,7 @@ mod tests {
         assert_eq!(cfg.llm.base_url, "http://localhost:1234/v1");
         assert_eq!(cfg.llm.prompt, DEFAULT_PROMPT);
         assert_eq!(cfg.ui.theme, ThemeName::Btop);
+        assert!(!cfg.run.dry_run);
     }
 
     #[test]

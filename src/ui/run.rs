@@ -86,7 +86,11 @@ fn header_left(app: &App, theme: &Theme) -> Line<'static> {
 
 fn header_right(app: &App, theme: &Theme) -> Line<'static> {
     let label = app.state_label();
-    let mut spans = vec![Span::styled(format!(" {label} "), theme.state_style(label))];
+    let mut spans = Vec::new();
+    if app.is_dry_run() {
+        spans.push(Span::styled(" DRY RUN ", theme.warn));
+    }
+    spans.push(Span::styled(format!(" {label} "), theme.state_style(label)));
     if let RunState::Error(msg) = &app.run_state {
         spans.insert(
             0,

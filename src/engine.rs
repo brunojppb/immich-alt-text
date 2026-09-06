@@ -570,16 +570,18 @@ impl Engine {
         };
         let llm_took = llm_started.elapsed();
 
-        if !self.stage(token, &id, Stage::Writing).await {
-            return Outcome::Cancelled;
-        }
-        if let Err(error) = self
-            .retry(token, false, || self.immich.set_description(&id, &text))
-            .await
-        {
-            return self
-                .fail_asset(token, terminal_cancel, id, name, error)
-                .await;
+        if !self.config.run.dry_run {
+            if !self.stage(token, &id, Stage::Writing).await {
+                return Outcome::Cancelled;
+            }
+            if let Err(error) = self
+                .retry(token, false, || self.immich.set_description(&id, &text))
+                .await
+            {
+                return self
+                    .fail_asset(token, terminal_cancel, id, name, error)
+                    .await;
+            }
         }
 
         if token.is_cancelled() {
@@ -792,6 +794,7 @@ mod tests {
                 workers: 1,
                 retries: 0,
                 page_size: 10,
+                dry_run: false,
             },
             ui: UiConfig::default(),
         }

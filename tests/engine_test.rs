@@ -42,6 +42,7 @@ fn config_with_run(
             workers,
             retries,
             page_size,
+            dry_run: false,
         },
         ui: UiConfig::default(),
     }
@@ -340,6 +341,40 @@ async fn skips_described_assets_and_writes_the_rest() {
         }
         other => panic!("unexpected last event {other:?}"),
     }
+    handle.shutdown(Duration::from_secs(1)).await;
+}
+
+#[tokio::test]
+async fn dry_run_describes_assets_without_writing_to_immich() {
+    let immich = MockServer::start().await;
+    let llm = MockServer::start().await;
+    mount_immich_basics(&immich, &[("a1", "IMG_1.HEIC", None)]).await;
+    Mock::given(method("PUT"))
+        .and(path("/api/assets/a1"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(0)
+        .mount(&immich)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(completion("x")))
+        .expect(1)
+        .mount(&llm)
+        .await;
+
+    let mut cfg = config(&immich, &llm);
+    cfg.run.dry_run = true;
+    let (tx, mut rx) = mpsc::channel(256);
+    let handle = engine::spawn_with(cfg, tx, fast()).unwrap();
+    handle.send(Command::Start).await;
+    let events = collect_until(&mut rx, |e| matches!(e, Event::RunFinished { .. })).await;
+
+    assert!(events
+        .iter()
+        .any(|event| matches!(event, Event::AssetDone { description, .. } if description == "x")));
+    assert!(!events
+        .iter()
+        .any(|event| matches!(event, Event::AssetFailed { .. })));
     handle.shutdown(Duration::from_secs(1)).await;
 }
 
