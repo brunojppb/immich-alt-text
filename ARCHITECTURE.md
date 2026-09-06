@@ -2,8 +2,6 @@
 
 This document describes the code on the current `main` branch. It explains the main modules, the run lifecycle, concurrency, errors, configuration, the TUI, and the tests. It describes the current system. It is not a future design.
 
-The text follows ASD-STE100 principles. It uses short sentences and common words where the technical meaning allows it.
-
 ## Overview
 
 `immich-alt-text` is a Rust terminal application. It finds Immich images with no description. It downloads a preview image. It asks an OpenAI-compatible vision model for a description.
