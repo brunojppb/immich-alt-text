@@ -1,49 +1,69 @@
 # immich-alt-text
 
-A small terminal app that describes the photos in your [Immich](https://immich.app)
-library with a vision model and writes the text back as each photo's description.
+`immich-alt-text` is a terminal application for Immich. It uses a vision model
+to create descriptions for images that do not have descriptions.
+
+This guide uses ASD-STE100 principles. It uses short sentences, common words,
+and direct instructions.
 
 ![immich-alt-text running in the terminal](tui.jpg)
 
-Built with Rust and [Ratatui](https://ratatui.rs). Personal project, experimental.
-See the [architecture guide](ARCHITECTURE.md) for the CLI's module boundaries,
-runtime lifecycle, concurrency model, TUI behavior, and testing seams.
+The application uses Rust and [Ratatui](https://ratatui.rs). It is a personal
+and experimental project. For the internal design, see
+[ARCHITECTURE.md](ARCHITECTURE.md).
 
 ## What it does
 
-1. Lists every image in your Immich library whose description is empty.
-2. Downloads the preview JPEG for each one.
-3. Sends it to an OpenAI-compatible chat endpoint with a vision model.
-4. Writes the returned sentence back to Immich.
+For each image without a description, the application:
 
-Use `--dry-run` or enable dry-run in the settings screen to perform discovery,
-preview downloads, and LLM calls without updating Immich descriptions. The CLI
-flag applies only to that invocation and overrides the saved setting.
+1. Finds the image in Immich.
+2. Downloads the preview JPEG.
+3. Sends the image to an OpenAI-compatible vision model.
+4. Writes the returned description to Immich.
 
-Immich keeps the state. A photo with a description is skipped, so you can stop and
-start the run at any time. Hand-written descriptions are never touched.
+The application does not change images that already have descriptions.
+Immich stores the progress. You can stop a run and start it again later.
+
+### Dry-run mode
+
+Dry-run mode performs the same search, download, and model requests. It does
+not update image descriptions in Immich.
+
+You can enable dry-run mode in either way:
+
+- Start the application with `--dry-run`.
+- Set `dry_run = true` in the settings screen.
+
+The CLI flag applies only to the current run. It overrides the saved setting.
+The settings value is saved for future runs.
 
 ## Requirements
 
-- Rust 1.98 or newer (only when building from source). The repository pins its
+- Rust 1.98 or newer when you build from source. The repository defines the
   development toolchain in `rust-toolchain.toml`.
-- An Immich server and an API key (Account settings → API keys). For the least
-  privilege, enable these permissions when creating the key:
-  - `asset.read` — list assets and read their descriptions.
-  - `asset.view` — download preview thumbnails for images.
-  - `asset.update` — write the generated description back to Immich.
-  The CLI's server-version check does not need an additional permission. These
-  are Immich's fine-grained API-key permissions (see the [Immich API
-  documentation](https://api.immich.app/)); on older Immich versions that do not
-  offer them, use the server's full-access API-key option instead.
-- A vision model behind an OpenAI-compatible API. Tested with LM Studio at
-  `http://localhost:1234/v1`. Ollama, llama.cpp server, vLLM, OpenRouter, and OpenAI
-  work with the same setting.
+- An Immich server and an API key.
+- A vision model that supports an OpenAI-compatible API.
+
+For normal mode, use an Immich API key with these permissions:
+
+- `asset.read` to list images and read descriptions.
+- `asset.view` to download image previews.
+- `asset.update` to write descriptions.
+
+Dry-run mode does not need `asset.update`.
+
+The server-version check does not need another permission. Older Immich
+versions may not support these permissions. On those versions, use a full
+access API key.
+
+The application was tested with LM Studio at
+`http://localhost:1234/v1`. Ollama, llama.cpp server, vLLM, OpenRouter, and
+OpenAI can use the same setting.
 
 ## Install a pre-built binary
 
-The installer downloads the latest release for your platform, verifies its
-SHA-256 checksum, and installs `immich-alt-text` to `~/.local/bin` by default.
+The installer downloads the latest release for your platform. It checks the
+SHA-256 checksum. It installs `immich-alt-text` in `~/.local/bin` by default.
 
 | Platform | Architecture | Release target |
 | --- | --- | --- |
@@ -57,7 +77,7 @@ For a quick install:
 curl -fsSL https://raw.githubusercontent.com/brunojppb/immich-alt-text/main/install.sh | sh
 ```
 
-For the safer download-then-run option, inspect the script before executing it:
+For a safer install, download the script first. Read it before you run it:
 
 ```bash
 curl -fsSLO https://raw.githubusercontent.com/brunojppb/immich-alt-text/main/install.sh
@@ -65,14 +85,14 @@ less install.sh
 sh install.sh
 ```
 
-Set `INSTALL_DIR` to use another writable directory:
+To use another directory, set `INSTALL_DIR`:
 
 ```bash
 INSTALL_DIR="$HOME/bin" sh install.sh
 ```
 
-The installer creates the directory if needed but never runs `sudo`. It prints
-PATH guidance when the selected directory is not already on your PATH.
+The installer creates the directory when needed. It never runs `sudo`. It
+prints a PATH message when the directory is not on your PATH.
 
 ### Build from source
 
@@ -86,14 +106,31 @@ Building from source requires Rust 1.98 or newer.
 
 ```bash
 immich-alt-text
-# or inspect what would be written without changing Immich
+```
+
+To run without changing Immich descriptions:
+
+```bash
 immich-alt-text --dry-run
 ```
 
-The first launch opens the settings screen. Fill in the Immich URL, the API key, the
-LLM base URL, the model name, and press `ctrl-t` to test both connections.
-`ctrl-s` saves to `~/.config/immich-alt-text/config.toml` and returns to the run
-screen. Press `s` to start.
+The first launch opens the settings screen. Enter these values:
+
+- Immich URL
+- Immich API key
+- LLM base URL
+- Model name
+
+Press `ctrl-t` to test both connections. Press `ctrl-s` to save the settings.
+The application saves them to
+`~/.config/immich-alt-text/config.toml` and opens the run screen. Press `s` to
+start a run.
+
+You can pass another config file:
+
+```bash
+immich-alt-text --config target/demo-config.toml
+```
 
 ## Keys
 
@@ -102,18 +139,18 @@ screen. Press `s` to start.
 | run | `s` | start a run |
 | run | `p` | pause or resume |
 | run | `↑` `↓` | move through the log |
-| run | `enter` | show the full description of the highlighted row |
+| run | `enter` | show the full text for the selected row |
 | run | `c` | open settings |
 | run | `q` or `ctrl-c` | quit |
 | settings | `tab` `shift-tab` | move between fields |
 | settings | `ctrl-r` | show or hide API keys |
 | settings | `ctrl-t` | test both connections |
-| settings | `ctrl-s` | save and go back |
-| settings | `←` `→` or `h` `l` | choose the UI theme or dry-run mode |
-| settings | `←` `→` `↑` `↓` | move within the prompt |
-| settings | `enter` | add a prompt line break |
+| settings | `ctrl-s` | save and return to the run screen |
+| settings | `←` `→` or `h` `l` | select the theme or dry-run value |
+| settings | `←` `→` `↑` `↓` | move in the prompt |
+| settings | `enter` | add a line break in the prompt |
 | settings | `ctrl-u` | clear the focused text field |
-| settings | `esc` | discard edits and go back |
+| settings | `esc` | discard changes and return |
 
 ## Config file
 
@@ -135,10 +172,10 @@ visible. No preamble, no quotes, no "This image shows".
 """
 
 [run]
-workers = 1             # parallel LLM calls, 1–64
-retries = 3             # 0–10 retries; default backoff is 2 s, 4 s, 8 s
-page_size = 1000        # 1–1000
-dry_run = false         # describe assets without updating Immich
+workers = 1             # parallel LLM calls, 1-64
+retries = 3             # 0-10 retries; default backoff is 2 s, 4 s, 8 s
+page_size = 1000        # 1-1000
+dry_run = false         # do not update Immich when true
 
 [ui]
 theme = "btop"          # or "mono"
@@ -147,22 +184,35 @@ theme = "btop"          # or "mono"
 `page_size` is file-only. The settings screen also lets you change the prompt,
 Immich and LLM timeouts, retry count, dry-run mode, and UI theme.
 
-The prompt is a multiline editor. Use the arrow keys to move within it, `enter`
-to add a line break, and `ctrl-u` to replace it quickly.
+The prompt editor supports multiple lines. Use the arrow keys to move in the
+prompt. Press `enter` to add a line break. Press `ctrl-u` to replace the
+prompt.
 
 ## Logs
 
-UTC daily logs are named `~/.local/state/immich-alt-text/debug.log.YYYY-MM-DD`.
-Set `RUST_LOG=debug` for more detail. Request bodies and keys are never logged.
+The application writes daily UTC logs to
+`~/.local/state/immich-alt-text/debug.log.YYYY-MM-DD`.
+
+Set `RUST_LOG=debug` for more detail. The logs never contain request bodies or
+API keys.
 
 ## Try it without a real library
 
+Start the fake servers in one terminal:
+
 ```bash
-cargo run --example fake_servers          # terminal 1
-cargo run -- --config target/demo-config.toml   # terminal 2
+cargo run --example fake_servers
+```
+
+Start the application in a second terminal:
+
+```bash
+cargo run -- --config target/demo-config.toml
 ```
 
 ## Development
+
+Run the tests and the linter:
 
 ```bash
 cargo test
@@ -171,11 +221,10 @@ cargo clippy --all-targets -- -D warnings
 
 ### Releases
 
-Releases are published only when a maintainer manually dispatches the release
-workflow from `main` with a version. Pull requests, pushes, and tag creation do
-not publish a release automatically. The workflow updates the Cargo package
-version, creates the `v<version>` tag, builds the three supported archives, and
-publishes them to GitHub Releases with matching `.sha256` files and release
-notes.
+Releases are published only when a maintainer starts the release workflow
+from `main` with a version.
 
-Architecture: [ARCHITECTURE.md](ARCHITECTURE.md).
+Pull requests, pushes, and tag creation do not publish a release. The
+workflow updates the Cargo package version, creates the `v<version>` tag,
+builds the three supported archives, and publishes them to GitHub Releases.
+It also publishes matching `.sha256` files and release notes.
