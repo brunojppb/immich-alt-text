@@ -170,6 +170,31 @@ fn settings_screen_mono_theme_selection() {
 }
 
 #[test]
+fn settings_screen_prompt_editor() {
+    let now = Instant::now();
+    let mut app = App::new(config(), true);
+    app.settings.focused = immich_alt_text::settings::PROMPT;
+    snapshot("settings_prompt_80x24", 80, 24, &app, now);
+}
+
+#[test]
+fn settings_screen_prompt_editor_scrolls_long_prompts() {
+    let now = Instant::now();
+    let mut app = App::new(config(), true);
+    app.settings.focused = immich_alt_text::settings::PROMPT;
+    app.settings.fields[immich_alt_text::settings::PROMPT].value =
+        "one\ntwo\nthree\nfour\nfive".into();
+    app.settings.prompt_cursor = app.settings.fields[immich_alt_text::settings::PROMPT]
+        .value
+        .chars()
+        .count();
+    let rendered = render_to_string(80, 24, &app, now);
+    assert!(rendered.contains("two"));
+    assert!(!rendered.contains("one"));
+    snapshot("settings_prompt_scroll_80x24", 80, 24, &app, now);
+}
+
+#[test]
 fn settings_screen_tiny_keeps_the_focused_row_visible() {
     let now = Instant::now();
     let mut app = App::new(config(), true);

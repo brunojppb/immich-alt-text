@@ -11,7 +11,7 @@ The implementation separates four kinds of work:
 - [`main`](src/main.rs#L35-L54) owns process concerns and side effects: CLI parsing, logging, terminal setup/restoration, keyboard input, the async event loop, connection-test tasks, runtime replacement, and shutdown.
 - [`App`](src/app.rs#L51-L75) is the in-memory UI state machine. `App::on_key` turns input into an [`Action`](src/events.rs#L100-L110), while `App::on_event` folds engine and connection-test events into renderable state. It performs no filesystem, terminal, network, or async I/O.
 - [`engine`](src/engine.rs#L42-L152) is the processing module. Its small external interface is `prepare`/`spawn`, `EngineHandle::send`, and the event receiver supplied by the caller; behind that interface it owns run control, discovery, worker coordination, retries, pause, cancellation, and terminal-event delivery.
-- [`ui`](src/ui/mod.rs#L14-L19) is a read-only projection of `App` and `Theme` onto a Ratatui frame. The run and settings renderers never mutate application state.
+- [`ui`](src/ui/mod.rs#L14-L19) is a read-only projection of `App` and `Theme` onto a Ratatui frame. The run renderer never mutates application state; the settings renderer only updates a view-only prompt-width cache so keyboard navigation follows the current terminal width.
 
 The HTTP-specific implementations are kept in [`immich`](src/immich.rs#L46-L173) and [`llm`](src/llm.rs#L22-L133). Configuration serialization and validation live in [`config`](src/config.rs), editable settings-form state in [`settings`](src/settings.rs), and style selection in [`theme`](src/theme.rs).
 
@@ -305,21 +305,21 @@ The settings screen is a centered form, up to 78 columns wide. Focus is marked w
 
 ```text
 ╭ settings ────────────────────────────────────────────────────────────╮
-│  immich url       https://photos.example                            │
-│  immich api key   ••••••••••                         ctrl-r show     │
-│▸ llm base url     http://localhost:1234/v1▏                         │
-│  llm api key                                             ctrl-r show │
-│  llm model        vision-model                                      │
-│  workers          2                                                 │
-│  max tokens       200                                               │
-│  ctrl-t test connections   immich ✓ v3.1.0   llm ✓ 200 OK           │
-│ ctrl-s save    ctrl-t test    esc back                              │
+│  immich url         https://photos.example                            │
+│  immich api key     ••••••••                         ctrl-r show     │
+│▸ prompt             Describe the subject and setting of this photo.   │
+│                     Mention important colors, objects, and actions.  │
+│                     Avoid speculation and do not add a preamble.▏    │
+│  llm timeout (s)    120                                              │
+│  theme              (●) btop   ( ) mono                              │
+│  ctrl-t test connections   immich ✓ v3.1.0   llm ✓ 200 OK             │
+│ ctrl-s save    ctrl-t test    ← → theme    ctrl-u clear    esc back  │
 ╰──────────────────────────────────────────────────────────────────────╯
 ```
 
 Run-screen controls are `s` to start from idle/finished/error, `p` to pause or resume, arrows to move the log selection, `enter` to open the selected row's full description/error popup, `c` to open settings, and `q` to quit. `esc` or `enter` closes the popup; other run keys are ignored while it is open, except global `ctrl-c`.
 
-Settings controls are `tab`/`shift-tab` to wrap focus, `enter` to advance (or save on the last field), normal characters and backspace to edit, `ctrl-r` to reveal/mask both keys, `ctrl-t` to test, `ctrl-s` to save, and `esc` to return without committing edits. `ctrl-c` quits from either screen. Settings may be viewed and tested during a run, but saving requires the run to be paused.
+Settings controls are `tab`/`shift-tab` to wrap focus, `enter` to advance (or save on the last field), normal characters and backspace to edit, and `ctrl-u` to clear a text field. While the prompt is focused, arrows move its cursor and `enter` inserts a line break. `ctrl-r` reveals/masks both keys, `ctrl-t` tests, `ctrl-s` saves, and `esc` returns without committing edits. `ctrl-c` quits from either screen. Settings may be viewed and tested during a run, but saving requires the run to be paused.
 
 [`Theme`](src/theme.rs#L7-L98) centralizes semantic styles rather than scattering colors through renderers. `btop` uses reverse video for selection; indexed colors apply to the semantic styles for success, error, warning, information, accent, names, durations, dim text, and borders. It also renders a green-to-yellow-to-red progress gradient. `mono` removes colors while retaining bold titles/accents, dim secondary text, and reversed selection. Run-state labels use success for running, warning for paused, error for error, and information for idle/finished.
 

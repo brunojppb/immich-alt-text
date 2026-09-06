@@ -4,20 +4,22 @@ use ratatui::layout::{Constraint, Flex, Layout, Rect};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Paragraph};
 use ratatui::Frame;
+use unicode_segmentation::UnicodeSegmentation;
 
 use super::truncate;
 use crate::app::App;
 use crate::config::ThemeName;
-use crate::settings::{IMMICH_KEY, LLM_KEY, THEME};
+use crate::settings::{prompt_layout, IMMICH_KEY, LLM_KEY, PROMPT, THEME};
 use crate::theme::Theme;
 
 const LABEL_WIDTH: usize = 19;
+const PROMPT_HEIGHT: usize = 4;
 
 pub fn render(frame: &mut Frame, app: &App, theme: &Theme) {
     let area = frame.area();
     let form = &app.settings;
     let width = area.width.saturating_sub(2).clamp(40, 78);
-    let height = (form.fields.len() as u16 + 9).min(area.height);
+    let height = (form.fields.len() as u16 + 9 + (PROMPT_HEIGHT as u16 - 1)).min(area.height);
     let [v] = Layout::vertical([Constraint::Length(height)])
         .flex(Flex::Center)
         .areas(area);
@@ -33,9 +35,57 @@ pub fn render(frame: &mut Frame, app: &App, theme: &Theme) {
     frame.render_widget(block, boxed);
 
     let value_width = (inner.width as usize).saturating_sub(2 + LABEL_WIDTH + 13);
+    let prompt_width = value_width.saturating_sub(1).max(1);
+    form.set_prompt_width(prompt_width);
     let mut lines: Vec<Line<'static>> = Vec::new();
+    let mut focused_line = 0;
     for (i, field) in form.fields.iter().enumerate() {
+        if i == PROMPT {
+            let layout = prompt_layout(&field.value, form.prompt_cursor, prompt_width);
+            let prompt_start = if form.focused == PROMPT {
+                layout
+                    .cursor_row
+                    .saturating_sub(PROMPT_HEIGHT.saturating_sub(1))
+            } else {
+                0
+            };
+            if form.focused == PROMPT {
+                focused_line = lines.len() + layout.cursor_row.saturating_sub(prompt_start);
+            }
+            for row in 0..PROMPT_HEIGHT {
+                let row_index = prompt_start + row;
+                let mut value = layout.rows.get(row_index).cloned().unwrap_or_default();
+                if form.focused == PROMPT && row_index == layout.cursor_row {
+                    value = insert_cursor(&value, layout.cursor_column);
+                }
+                let label = if row == 0 { field.label } else { "" };
+                let value_style = if form.focused == PROMPT {
+                    theme.accent
+                } else {
+                    theme.value
+                };
+                lines.push(Line::from(vec![
+                    Span::styled(
+                        if form.focused == PROMPT && row == 0 {
+                            "▸ "
+                        } else {
+                            "  "
+                        },
+                        theme.accent,
+                    ),
+                    Span::styled(format!("{label:<width$}", width = LABEL_WIDTH), theme.label),
+                    Span::styled(
+                        format!("{value:<width$}", width = value_width + 1),
+                        value_style,
+                    ),
+                ]));
+            }
+            continue;
+        }
         let focused = i == form.focused;
+        if focused {
+            focused_line = lines.len();
+        }
         let mut value = truncate(&form.display_value(i), value_width);
         if focused {
             value.push('▏');
@@ -62,6 +112,9 @@ pub fn render(frame: &mut Frame, app: &App, theme: &Theme) {
         }
         lines.push(Line::from(spans));
     }
+    if form.focused == THEME {
+        focused_line = lines.len();
+    }
     lines.push(theme_line(form, theme));
     lines.push(Line::default());
     lines.push(test_line(app, theme));
@@ -72,7 +125,7 @@ pub fn render(frame: &mut Frame, app: &App, theme: &Theme) {
     let content_height = inner.height.saturating_sub(1);
     let max_scroll = lines.len().saturating_sub(content_height as usize);
     let visible_focus_offset = content_height.saturating_sub(1) as usize;
-    let mut scroll = form.focused.saturating_sub(visible_focus_offset);
+    let mut scroll = focused_line.saturating_sub(visible_focus_offset);
     scroll = scroll.min(max_scroll);
     let content = Rect {
         height: content_height,
@@ -97,6 +150,16 @@ pub fn render(frame: &mut Frame, app: &App, theme: &Theme) {
     spans.extend(key("ctrl-u", "clear"));
     spans.extend(key("esc", "back"));
     frame.render_widget(Paragraph::new(Line::from(spans)), footer);
+}
+
+fn insert_cursor(value: &str, column: usize) -> String {
+    let byte_index = value
+        .grapheme_indices(true)
+        .nth(column)
+        .map_or(value.len(), |(index, _)| index);
+    let mut output = value.to_string();
+    output.insert(byte_index, '▏');
+    output
 }
 
 fn theme_line(form: &crate::settings::SettingsForm, theme: &Theme) -> Line<'static> {

@@ -104,6 +104,8 @@ screen. Press `s` to start.
 | settings | `ctrl-t` | test both connections |
 | settings | `ctrl-s` | save and go back |
 | settings | `←` `→` or `h` `l` | choose the UI theme |
+| settings | `←` `→` `↑` `↓` | move within the prompt |
+| settings | `enter` | add a prompt line break |
 | settings | `ctrl-u` | clear the focused text field |
 | settings | `esc` | discard edits and go back |
 
@@ -137,6 +139,9 @@ theme = "btop"          # or "mono"
 
 `page_size` is file-only. The settings screen also lets you change the prompt,
 Immich and LLM timeouts, retry count, and UI theme.
+
+The prompt is a multiline editor. Use the arrow keys to move within it, `enter`
+to add a line break, and `ctrl-u` to replace it quickly.
 
 ## Logs
 

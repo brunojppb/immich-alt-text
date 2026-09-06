@@ -336,9 +336,29 @@ impl App {
                 self.settings.focus_prev();
                 None
             }
+            Key::Enter if self.settings.focused == crate::settings::PROMPT => {
+                self.settings.newline();
+                None
+            }
             Key::Enter if self.settings.is_last_focused() => self.save_settings(),
             Key::Enter => {
                 self.settings.focus_next();
+                None
+            }
+            Key::Left if self.settings.focused == crate::settings::PROMPT => {
+                self.settings.move_prompt_left();
+                None
+            }
+            Key::Right if self.settings.focused == crate::settings::PROMPT => {
+                self.settings.move_prompt_right();
+                None
+            }
+            Key::Up if self.settings.focused == crate::settings::PROMPT => {
+                self.settings.move_prompt_up();
+                None
+            }
+            Key::Down if self.settings.focused == crate::settings::PROMPT => {
+                self.settings.move_prompt_down();
                 None
             }
             Key::Left | Key::Char('h') if self.settings.focused == THEME => {
@@ -857,6 +877,20 @@ mod tests {
         a.settings.focused = crate::settings::PROMPT;
         assert_eq!(a.on_key(Key::CtrlU), None);
         assert!(a.settings.fields[crate::settings::PROMPT].value.is_empty());
+    }
+
+    #[test]
+    fn prompt_keys_edit_multiple_lines() {
+        let mut a = app();
+        a.on_key(Key::Char('c'));
+        a.settings.focused = crate::settings::PROMPT;
+        a.on_key(Key::CtrlU);
+        a.on_key(Key::Char('A'));
+        a.on_key(Key::Enter);
+        a.on_key(Key::Char('B'));
+        a.on_key(Key::Up);
+        a.on_key(Key::Char('!'));
+        assert_eq!(a.settings.fields[crate::settings::PROMPT].value, "A!\nB");
     }
 
     #[test]

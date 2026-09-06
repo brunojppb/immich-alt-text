@@ -1,6 +1,10 @@
 //! The settings form: field values, focus, edits, and conversion to a `Config`.
 
+use std::cell::Cell;
+
 use crate::config::{Config, ThemeName};
+use ratatui::text::Span;
+use unicode_segmentation::UnicodeSegmentation;
 
 pub const IMMICH_URL: usize = 0;
 pub const IMMICH_KEY: usize = 1;
@@ -16,12 +20,21 @@ pub const MAX_TOKENS: usize = 10;
 pub const THEME: usize = 11;
 
 const FIELD_COUNT: usize = THEME + 1;
+pub const PROMPT_WRAP_WIDTH: usize = 43;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Field {
     pub label: &'static str,
     pub value: String,
     pub secret: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PromptLayout {
+    pub rows: Vec<String>,
+    pub row_starts: Vec<usize>,
+    pub cursor_row: usize,
+    pub cursor_column: usize,
 }
 
 /// Outcome of the last connection test, one entry per server.
@@ -31,6 +44,9 @@ pub type TestResult = (Result<String, String>, Result<String, String>);
 pub struct SettingsForm {
     pub fields: Vec<Field>,
     pub theme: ThemeName,
+    /// Cursor position in the prompt, measured in Unicode grapheme clusters.
+    pub prompt_cursor: usize,
+    prompt_width: Cell<usize>,
     pub focused: usize,
     pub show_secrets: bool,
     pub testing: bool,
@@ -67,6 +83,8 @@ impl SettingsForm {
         Self {
             fields,
             theme: cfg.ui.theme,
+            prompt_cursor: cfg.llm.prompt.graphemes(true).count(),
+            prompt_width: Cell::new(PROMPT_WRAP_WIDTH),
             focused: 0,
             show_secrets: false,
             testing: false,
@@ -88,22 +106,104 @@ impl SettingsForm {
     }
 
     pub fn insert(&mut self, c: char) {
-        if self.focused < self.fields.len() {
+        if self.focused == PROMPT {
+            self.insert_prompt(c);
+        } else if self.focused < self.fields.len() {
             self.fields[self.focused].value.push(c);
         }
     }
 
     pub fn backspace(&mut self) {
-        if self.focused < self.fields.len() {
+        if self.focused == PROMPT {
+            self.backspace_prompt();
+        } else if self.focused < self.fields.len() {
             self.fields[self.focused].value.pop();
         }
     }
 
+    pub fn newline(&mut self) {
+        if self.focused == PROMPT {
+            self.insert_prompt('\n');
+        }
+    }
+
+    pub fn move_prompt_left(&mut self) {
+        if self.focused == PROMPT {
+            self.prompt_cursor = self.prompt_cursor.saturating_sub(1);
+        }
+    }
+
+    pub fn move_prompt_right(&mut self) {
+        if self.focused == PROMPT {
+            self.prompt_cursor = (self.prompt_cursor + 1).min(self.prompt_len());
+        }
+    }
+
+    pub fn move_prompt_up(&mut self) {
+        if self.focused != PROMPT {
+            return;
+        }
+        let layout = prompt_layout(self.prompt_value(), self.prompt_cursor, self.prompt_width());
+        if layout.cursor_row == 0 {
+            return;
+        }
+        let target_row = layout.cursor_row - 1;
+        let target_column = layout.rows[target_row].graphemes(true).count();
+        self.prompt_cursor =
+            layout.row_starts[target_row] + layout.cursor_column.min(target_column);
+    }
+
+    pub fn move_prompt_down(&mut self) {
+        if self.focused != PROMPT {
+            return;
+        }
+        let layout = prompt_layout(self.prompt_value(), self.prompt_cursor, self.prompt_width());
+        if layout.cursor_row + 1 == layout.rows.len() {
+            return;
+        }
+        let target_row = layout.cursor_row + 1;
+        let target_column = layout.rows[target_row].graphemes(true).count();
+        self.prompt_cursor =
+            layout.row_starts[target_row] + layout.cursor_column.min(target_column);
+    }
+
     /// Clears the focused text field. Theme selection is intentionally not text-editable.
     pub fn clear(&mut self) {
-        if self.focused < self.fields.len() {
+        if self.focused == PROMPT {
+            self.fields[PROMPT].value.clear();
+            self.prompt_cursor = 0;
+        } else if self.focused < self.fields.len() {
             self.fields[self.focused].value.clear();
         }
+    }
+
+    fn prompt_value(&self) -> &str {
+        &self.fields[PROMPT].value
+    }
+
+    fn prompt_len(&self) -> usize {
+        self.prompt_value().graphemes(true).count()
+    }
+
+    fn insert_prompt(&mut self, c: char) {
+        let byte_index = grapheme_to_byte(self.prompt_value(), self.prompt_cursor);
+        self.fields[PROMPT].value.insert(byte_index, c);
+        let inserted_end = byte_index + c.len_utf8();
+        self.prompt_cursor = self
+            .prompt_value()
+            .grapheme_indices(true)
+            .position(|(start, _)| start >= inserted_end)
+            .unwrap_or_else(|| self.prompt_len());
+    }
+
+    fn backspace_prompt(&mut self) {
+        if self.prompt_cursor == 0 {
+            return;
+        }
+        let end = grapheme_to_byte(self.prompt_value(), self.prompt_cursor);
+        let start = grapheme_to_byte(self.prompt_value(), self.prompt_cursor - 1);
+        self.fields[PROMPT].value.drain(start..end);
+        self.prompt_cursor -= 1;
     }
 
     pub fn select_theme_next(&mut self) {
@@ -116,6 +216,14 @@ impl SettingsForm {
 
     pub fn toggle_secrets(&mut self) {
         self.show_secrets = !self.show_secrets;
+    }
+
+    pub fn set_prompt_width(&self, width: usize) {
+        self.prompt_width.set(width.max(1));
+    }
+
+    fn prompt_width(&self) -> usize {
+        self.prompt_width.get()
     }
 
     /// The text to draw for a field. Secrets show as dots unless revealed.
@@ -141,7 +249,7 @@ impl SettingsForm {
         cfg.llm.base_url = self.fields[LLM_URL].value.trim().to_string();
         cfg.llm.api_key = self.fields[LLM_KEY].value.trim().to_string();
         cfg.llm.model = self.fields[LLM_MODEL].value.trim().to_string();
-        cfg.llm.prompt = self.fields[PROMPT].value.trim().to_string();
+        cfg.llm.prompt = self.fields[PROMPT].value.clone();
         cfg.llm.timeout_secs = self.fields[LLM_TIMEOUT]
             .value
             .trim()
@@ -165,6 +273,64 @@ impl SettingsForm {
         cfg.ui.theme = self.theme;
         cfg.validate().map_err(|error| error.to_string())?;
         Ok(cfg)
+    }
+}
+
+fn grapheme_to_byte(value: &str, grapheme_index: usize) -> usize {
+    value
+        .grapheme_indices(true)
+        .nth(grapheme_index)
+        .map_or(value.len(), |(byte_index, _)| byte_index)
+}
+
+pub fn prompt_layout(value: &str, cursor: usize, width: usize) -> PromptLayout {
+    let width = width.max(1);
+    let graphemes: Vec<&str> = value.graphemes(true).collect();
+    let cursor = cursor.min(graphemes.len());
+    let mut rows = vec![String::new()];
+    let mut row_starts = vec![0];
+    let mut row_widths = vec![0usize];
+    let mut cursor_row = 0;
+    let mut cursor_column = 0;
+
+    for (index, grapheme) in graphemes.iter().enumerate() {
+        if *grapheme == "\n" {
+            if index == cursor {
+                cursor_row = rows.len() - 1;
+                cursor_column = rows.last().map_or(0, |row| row.graphemes(true).count());
+            }
+            rows.push(String::new());
+            row_starts.push(index + 1);
+            row_widths.push(0);
+            continue;
+        }
+        let grapheme_width = Span::raw(*grapheme).width().max(1);
+        let last = row_widths.len() - 1;
+        if row_widths[last] > 0 && row_widths[last] + grapheme_width > width {
+            rows.push(String::new());
+            row_starts.push(index);
+            row_widths.push(0);
+        }
+        if index == cursor {
+            cursor_row = rows.len() - 1;
+            cursor_column = rows.last().map_or(0, |row| row.graphemes(true).count());
+        }
+        rows.last_mut()
+            .expect("prompt always has a row")
+            .push_str(grapheme);
+        *row_widths.last_mut().expect("prompt always has a row") += grapheme_width;
+    }
+
+    if cursor == graphemes.len() {
+        cursor_row = rows.len() - 1;
+        cursor_column = rows.last().map_or(0, |row| row.graphemes(true).count());
+    }
+
+    PromptLayout {
+        rows,
+        row_starts,
+        cursor_row,
+        cursor_column,
     }
 }
 
@@ -239,6 +405,57 @@ mod tests {
         f.backspace();
         f.insert('X');
         assert_eq!(f.fields[LLM_MODEL].value, "gemmX");
+    }
+
+    #[test]
+    fn prompt_editor_supports_newlines_and_cursor_movement() {
+        let mut f = SettingsForm::from_config(&base());
+        f.focused = PROMPT;
+        f.clear();
+        f.insert('A');
+        f.newline();
+        f.insert('B');
+        f.move_prompt_up();
+        f.insert('!');
+        f.move_prompt_down();
+        f.backspace();
+
+        assert_eq!(f.fields[PROMPT].value, "A!\n");
+    }
+
+    #[test]
+    fn prompt_editor_keeps_the_full_multiline_value_when_saved() {
+        let mut f = SettingsForm::from_config(&base());
+        f.fields[PROMPT].value = "\nfirst line\nsecond line\n".into();
+        let cfg = f.to_config(&base()).unwrap();
+        assert_eq!(cfg.llm.prompt, "\nfirst line\nsecond line\n");
+    }
+
+    #[test]
+    fn prompt_editor_treats_a_zwj_emoji_as_one_editable_unit() {
+        let mut f = SettingsForm::from_config(&base());
+        f.focused = PROMPT;
+        f.clear();
+        f.insert('👩');
+        f.insert('\u{200d}');
+        f.insert('💻');
+        f.backspace();
+
+        assert!(f.fields[PROMPT].value.is_empty());
+    }
+
+    #[test]
+    fn prompt_editor_moves_across_soft_wrapped_rows() {
+        let mut f = SettingsForm::from_config(&base());
+        f.focused = PROMPT;
+        f.clear();
+        for _ in 0..(PROMPT_WRAP_WIDTH + 5) {
+            f.insert('x');
+        }
+
+        f.move_prompt_up();
+
+        assert_eq!(f.prompt_cursor, 5);
     }
 
     #[test]
