@@ -1162,7 +1162,7 @@ dependencies = [
 
 [[package]]
 name = "immich-alt-text"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
