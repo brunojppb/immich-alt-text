@@ -9,21 +9,23 @@ use unicode_segmentation::UnicodeSegmentation;
 pub const IMMICH_URL: usize = 0;
 pub const IMMICH_KEY: usize = 1;
 pub const IMMICH_TIMEOUT: usize = 2;
-pub const LLM_URL: usize = 3;
-pub const LLM_KEY: usize = 4;
-pub const LLM_MODEL: usize = 5;
-pub const PROMPT: usize = 6;
-pub const LLM_TIMEOUT: usize = 7;
-pub const WORKERS: usize = 8;
-pub const RETRIES: usize = 9;
-pub const MAX_TOKENS: usize = 10;
-pub const CONTEXT_PEOPLE: usize = 11;
-pub const CONTEXT_PLACE: usize = 12;
-pub const CONTEXT_DATE: usize = 13;
-pub const THEME: usize = 14;
-pub const DRY_RUN: usize = 15;
+pub const IMMICH_TAG: usize = 3;
+pub const LLM_URL: usize = 4;
+pub const LLM_KEY: usize = 5;
+pub const LLM_MODEL: usize = 6;
+pub const PROMPT: usize = 7;
+pub const LLM_TIMEOUT: usize = 8;
+pub const WORKERS: usize = 9;
+pub const RETRIES: usize = 10;
+pub const MAX_TOKENS: usize = 11;
+pub const CONTEXT_PEOPLE: usize = 12;
+pub const CONTEXT_PLACE: usize = 13;
+pub const CONTEXT_DATE: usize = 14;
+pub const THEME: usize = 15;
+pub const DRY_RUN: usize = 16;
+pub const OVERWRITE: usize = 17;
 
-const FIELD_COUNT: usize = DRY_RUN + 1;
+const FIELD_COUNT: usize = OVERWRITE + 1;
 pub const PROMPT_WRAP_WIDTH: usize = 43;
 
 /// Row labels for the context switches, in row order.
@@ -57,6 +59,7 @@ pub struct SettingsForm {
     pub fields: Vec<Field>,
     pub theme: ThemeName,
     pub dry_run: bool,
+    pub overwrite: bool,
     /// The three context switches, in row order: people, place, date.
     pub context: [bool; 3],
     /// Cursor position in the prompt, measured in Unicode grapheme clusters.
@@ -85,6 +88,7 @@ impl SettingsForm {
                 cfg.immich.timeout_secs.to_string(),
                 false,
             ),
+            field("immich tag", cfg.immich.tag.clone(), false),
             field("llm base url", cfg.llm.base_url.clone(), false),
             field("llm api key", cfg.llm.api_key.clone(), true),
             field("llm model", cfg.llm.model.clone(), false),
@@ -94,11 +98,12 @@ impl SettingsForm {
             field("retries", cfg.run.retries.to_string(), false),
             field("max tokens", cfg.llm.max_tokens.to_string(), false),
         ];
-        debug_assert_eq!(fields.len() + 5, FIELD_COUNT);
+        debug_assert_eq!(fields.len() + 6, FIELD_COUNT);
         Self {
             fields,
             theme: cfg.ui.theme,
             dry_run: cfg.run.dry_run,
+            overwrite: cfg.run.overwrite,
             context: [
                 cfg.llm.context.people,
                 cfg.llm.context.place,
@@ -244,6 +249,14 @@ impl SettingsForm {
         self.dry_run = false;
     }
 
+    pub fn select_overwrite_next(&mut self) {
+        self.overwrite = true;
+    }
+
+    pub fn select_overwrite_prev(&mut self) {
+        self.overwrite = false;
+    }
+
     /// Row index inside `context`, when a context row has focus.
     fn context_index(&self) -> Option<usize> {
         is_context_row(self.focused).then(|| self.focused - CONTEXT_PEOPLE)
@@ -293,6 +306,7 @@ impl SettingsForm {
             .trim()
             .parse()
             .map_err(|_| "immich timeout must be a whole number".to_string())?;
+        cfg.immich.tag = self.fields[IMMICH_TAG].value.trim().to_string();
         cfg.llm.base_url = self.fields[LLM_URL].value.trim().to_string();
         cfg.llm.api_key = self.fields[LLM_KEY].value.trim().to_string();
         cfg.llm.model = self.fields[LLM_MODEL].value.trim().to_string();
@@ -319,6 +333,7 @@ impl SettingsForm {
             .map_err(|_| "max tokens must be a whole number".to_string())?;
         cfg.ui.theme = self.theme;
         cfg.run.dry_run = self.dry_run;
+        cfg.run.overwrite = self.overwrite;
         cfg.llm.context.people = self.context[0];
         cfg.llm.context.place = self.context[1];
         cfg.llm.context.date = self.context[2];
@@ -403,9 +418,10 @@ mod tests {
     #[test]
     fn from_config_fills_all_fields() {
         let f = SettingsForm::from_config(&base());
-        assert_eq!(f.fields.len(), 11);
+        assert_eq!(f.fields.len(), 12);
         assert_eq!(f.fields[IMMICH_URL].value, "https://photos.home.lan");
         assert_eq!(f.fields[IMMICH_KEY].value, "secret-key");
+        assert_eq!(f.fields[IMMICH_TAG].value, "");
         assert_eq!(f.fields[LLM_URL].value, "http://localhost:1234/v1");
         assert_eq!(f.fields[LLM_KEY].value, "");
         assert_eq!(f.fields[LLM_MODEL].value, "gemma");
@@ -433,7 +449,7 @@ mod tests {
     fn focus_wraps_both_ways() {
         let mut f = SettingsForm::from_config(&base());
         f.focus_prev();
-        assert_eq!(f.focused, DRY_RUN);
+        assert_eq!(f.focused, OVERWRITE);
         f.focus_next();
         assert_eq!(f.focused, IMMICH_URL);
     }
@@ -620,6 +636,54 @@ mod tests {
         f.context = [true, true, true];
         let cfg = f.to_config(&base).unwrap();
         assert!(!cfg.llm.context.enabled);
+    }
+
+    #[test]
+    fn from_config_fills_the_tag_and_the_overwrite_value() {
+        let mut cfg = base();
+        cfg.immich.tag = "gen-desc".into();
+        cfg.run.overwrite = true;
+        let f = SettingsForm::from_config(&cfg);
+        assert_eq!(f.fields.len(), 12);
+        assert_eq!(f.fields[IMMICH_TAG].value, "gen-desc");
+        assert!(f.overwrite);
+    }
+
+    #[test]
+    fn to_config_trims_the_tag_and_keeps_the_overwrite_value() {
+        let mut f = SettingsForm::from_config(&base());
+        f.fields[IMMICH_TAG].value = "  gen-desc  ".into();
+        f.overwrite = true;
+        let cfg = f.to_config(&base()).unwrap();
+        assert_eq!(cfg.immich.tag, "gen-desc");
+        assert!(cfg.run.overwrite);
+    }
+
+    #[test]
+    fn to_config_reports_an_invalid_tag() {
+        let mut f = SettingsForm::from_config(&base());
+        f.fields[IMMICH_TAG].value = "a//b".into();
+        let err = f.to_config(&base()).unwrap_err();
+        assert!(err.contains("immich.tag"), "{err}");
+    }
+
+    #[test]
+    fn clear_empties_the_tag_row() {
+        let mut cfg = base();
+        cfg.immich.tag = "gen-desc".into();
+        let mut f = SettingsForm::from_config(&cfg);
+        f.focused = IMMICH_TAG;
+        f.clear();
+        assert_eq!(f.fields[IMMICH_TAG].value, "");
+    }
+
+    #[test]
+    fn the_overwrite_row_is_the_last_row() {
+        let f = SettingsForm::from_config(&base());
+        assert_eq!(OVERWRITE + 1, FIELD_COUNT);
+        let mut f = f;
+        f.focused = OVERWRITE;
+        assert!(f.is_last_focused());
     }
 
     #[test]

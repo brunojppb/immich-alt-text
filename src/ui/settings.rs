@@ -10,7 +10,8 @@ use super::truncate;
 use crate::app::App;
 use crate::config::ThemeName;
 use crate::settings::{
-    prompt_layout, CONTEXT_LABELS, CONTEXT_PEOPLE, DRY_RUN, IMMICH_KEY, LLM_KEY, PROMPT, THEME,
+    prompt_layout, CONTEXT_LABELS, CONTEXT_PEOPLE, DRY_RUN, IMMICH_KEY, IMMICH_TAG, LLM_KEY,
+    OVERWRITE, PROMPT, THEME,
 };
 use crate::theme::Theme;
 
@@ -21,10 +22,10 @@ pub fn render(frame: &mut Frame, app: &App, theme: &Theme) {
     let area = frame.area();
     let form = &app.settings;
     let width = area.width.saturating_sub(2).clamp(40, 78);
-    // Rows beyond the fields: the context switches, theme, dry run, a blank
-    // line, the test-connections line, the message line, the box borders,
-    // and the footer row.
-    let fixed_rows = CONTEXT_LABELS.len() as u16 + 9;
+    // Rows beyond the fields: the context switches, theme, dry run, overwrite,
+    // a blank line, the test-connections line, the message line, the box
+    // borders, and the footer row.
+    let fixed_rows = CONTEXT_LABELS.len() as u16 + 10;
     let height =
         (form.fields.len() as u16 + fixed_rows + (PROMPT_HEIGHT as u16 - 1)).min(area.height);
     let [v] = Layout::vertical([Constraint::Length(height)])
@@ -117,6 +118,9 @@ pub fn render(frame: &mut Frame, app: &App, theme: &Theme) {
             };
             spans.push(Span::styled(hint, theme.dim));
         }
+        if i == IMMICH_TAG && field.value.trim().is_empty() {
+            spans.push(Span::styled("empty: no tag", theme.dim));
+        }
         lines.push(Line::from(spans));
     }
     for (offset, label) in CONTEXT_LABELS.iter().enumerate() {
@@ -142,6 +146,15 @@ pub fn render(frame: &mut Frame, app: &App, theme: &Theme) {
         "dry run",
         form.dry_run,
         form.focused == DRY_RUN,
+        theme,
+    ));
+    if form.focused == OVERWRITE {
+        focused_line = lines.len();
+    }
+    lines.push(switch_line(
+        "overwrite",
+        form.overwrite,
+        form.focused == OVERWRITE,
         theme,
     ));
     lines.push(Line::default());

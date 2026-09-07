@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use crate::config::{Config, Overrides};
 use crate::events::{Action, Command, Event, Key, Stage};
-use crate::settings::{is_context_row, SettingsForm, DRY_RUN, THEME};
+use crate::settings::{is_context_row, SettingsForm, DRY_RUN, OVERWRITE, THEME};
 
 pub const LOG_CAP: usize = 500;
 pub const RATE_WINDOW: usize = 20;
@@ -388,6 +388,14 @@ impl App {
                 self.settings.select_dry_run_next();
                 None
             }
+            Key::Left | Key::Char('h') if self.settings.focused == OVERWRITE => {
+                self.settings.select_overwrite_prev();
+                None
+            }
+            Key::Right | Key::Char('l') if self.settings.focused == OVERWRITE => {
+                self.settings.select_overwrite_next();
+                None
+            }
             Key::Left | Key::Char('h') if is_context_row(self.settings.focused) => {
                 self.settings.select_context_prev();
                 None
@@ -767,6 +775,7 @@ mod tests {
         a.on_key(Key::Tab);
         a.on_key(Key::Tab);
         a.on_key(Key::Tab);
+        a.on_key(Key::Tab);
         a.on_key(Key::Char('!'));
         assert_eq!(
             a.settings.fields[crate::settings::LLM_MODEL].value,
@@ -913,7 +922,7 @@ mod tests {
     fn enter_on_last_field_saves() {
         let mut a = app();
         a.on_key(Key::Char('c'));
-        a.settings.focused = crate::settings::DRY_RUN;
+        a.settings.focused = crate::settings::OVERWRITE;
         assert!(matches!(a.on_key(Key::Enter), Some(Action::SaveConfig(_))));
     }
 
@@ -927,6 +936,18 @@ mod tests {
         assert_eq!(a.settings.theme, ThemeName::Mono);
         assert_eq!(a.on_key(Key::Char('h')), None);
         assert_eq!(a.settings.theme, ThemeName::Btop);
+    }
+
+    #[test]
+    fn overwrite_selector_uses_horizontal_keys() {
+        let mut a = app();
+        a.on_key(Key::Char('c'));
+        a.settings.focused = crate::settings::OVERWRITE;
+        assert!(!a.settings.overwrite);
+        assert_eq!(a.on_key(Key::Right), None);
+        assert!(a.settings.overwrite);
+        assert_eq!(a.on_key(Key::Char('h')), None);
+        assert!(!a.settings.overwrite);
     }
 
     #[test]
