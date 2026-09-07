@@ -225,7 +225,7 @@ immich-alt-text --config target/demo-config.toml
 url = "https://photos.home.lan"
 api_key = "..."
 timeout_secs = 30
-tag = "gen-desc"        # empty: do not tag
+tag = ""                # e.g. "gen-desc"; empty: do not tag
 
 [llm]
 base_url = "http://localhost:1234/v1"
