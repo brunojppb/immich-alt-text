@@ -119,7 +119,7 @@ pub fn render(frame: &mut Frame, app: &App, theme: &Theme) {
             spans.push(Span::styled(hint, theme.dim));
         }
         if i == IMMICH_TAG && field.value.trim().is_empty() {
-            spans.push(Span::styled("empty: no tag", theme.dim));
+            spans.push(Span::styled("no tag", theme.dim));
         }
         lines.push(Line::from(spans));
     }
@@ -164,9 +164,13 @@ pub fn render(frame: &mut Frame, app: &App, theme: &Theme) {
         None => Line::default(),
     });
     // A message is the scroll anchor when there is one, so it is always in
-    // view even on a short terminal; otherwise the focused row anchors it.
+    // view even on a short terminal. A connection test result must stay
+    // visible for the same reason, so it anchors next; otherwise the
+    // focused row anchors it.
     let anchor_line = if form.message.is_some() {
         lines.len() - 1
+    } else if form.test_result.is_some() || form.testing {
+        lines.len() - 2
     } else {
         focused_line
     };
