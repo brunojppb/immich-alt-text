@@ -4,7 +4,7 @@ This document describes the code on the current `main` branch. It explains the m
 
 ## Overview
 
-`immich-alt-text` is a Rust terminal application. It finds Immich images with no description. It downloads a preview image. It asks an OpenAI-compatible vision model for a description.
+`immich-alt-text` is a Rust terminal application. It finds Immich images with no description. It downloads a preview image. It asks an OpenAI-compatible vision model for a description. The request also carries a short block of library context: the people Immich recognised, the place, and the local date.
 
 In normal mode, the application writes the description to Immich. In dry-run mode, it does not write to Immich. Both modes perform the search, preview download, and model request.
 
@@ -16,6 +16,7 @@ Immich stores the progress. A later normal run searches again. It skips images t
 - [`App`](src/app.rs) stores UI state in memory. `App::on_key` converts input into an [`Action`](src/events.rs). `App::on_event` applies engine and connection-test events. `App` does not perform file, terminal, network, or async I/O.
 - [`engine`](src/engine.rs) finds and processes assets. It controls workers, retries, pause, cancellation, and run events.
 - [`ui`](src/ui/mod.rs) reads `App` and `Theme` and draws the Ratatui frame. The renderers do not change application state, except for the prompt width value used by the settings form.
+- [`prompt`](src/prompt.rs) builds the prompt for one photo from the configured prompt and the asset context. It performs no I/O.
 - [`immich`](src/immich.rs) and [`llm`](src/llm.rs) contain the HTTP clients. [`config`](src/config.rs) contains config load, save, and validation. [`settings`](src/settings.rs) contains editable form state. [`theme`](src/theme.rs) contains display styles.
 
 ### Design goals
@@ -247,6 +248,7 @@ flowchart TD
     Queue[Asset queue]
     Preview[Get preview]
     Encode[Create image data]
+    Prompt[Build prompt with context]
     Complete[Call LLM]
     Text{Text is nonblank?}
     DryRun{Dry run?}
@@ -261,7 +263,8 @@ flowchart TD
     Filter -->|yes| Queue
     Queue --> Preview
     Preview --> Encode
-    Encode --> Complete
+    Encode --> Prompt
+    Prompt --> Complete
     Complete --> Text
     Text -->|no| Fail
     Text -->|yes| DryRun
@@ -283,11 +286,13 @@ flowchart TD
 It provides these operations:
 
 - `version`: `GET /api/server/version` for connection tests;
-- `list_images`: `POST /api/search/metadata` for newest-first image pages;
+- `list_images`: `POST /api/search/metadata` for newest-first image pages, with `withExif` and `withPeople`;
 - `preview_jpeg`: `GET /api/assets/{id}/thumbnail?size=preview`; and
 - `set_description`: `PUT /api/assets/{id}` with a JSON description.
 
 Missing EXIF data, `null` descriptions, and whitespace-only descriptions need a new description. The client treats invalid search data and invalid `nextPage` values as permanent errors.
+
+`list_images` also reads the context for each image from the same page. It keeps the names of people, dropping hidden people and blank names, and it stops at six names. It reads `city`, `state`, and `country`, skipping empty values and a value that repeats the one before it. It parses `localDateTime` as the local wall-clock time. Metadata the server omits leaves an empty context. It never fails an image.
 
 Status handling is:
 
@@ -302,7 +307,7 @@ Client construction errors are fatal. Request and response-shape errors are perm
 
 [`LlmClient`](src/llm.rs) treats the configured base URL as the API root. `ping` calls `GET /models`. `describe` calls `POST /chat/completions`.
 
-The request contains the prompt and a base64 JPEG data URL. It also contains the model and `max_tokens` values.
+The request contains the prompt and a base64 JPEG data URL. It also contains the model and `max_tokens` values. The engine builds that prompt with [`prompt::build`](src/prompt.rs), so the context block travels with the image. `build` appends the block after the configured prompt, or replaces a `{{context}}` placeholder when the prompt holds one. The block leads with its own instruction, so a prompt that never mentions the context still gets named people. A disabled switch, an empty value, and `enabled = false` each remove their part. Nothing remains when no part survives.
 
 The response parser reads only the first choice. It trims the text. Missing or blank text is a permanent error. The application does not edit the prompt, check the output length, moderate the text, or use a fallback model.
 
@@ -337,13 +342,19 @@ Serde defaults fill missing sections and keys.
 | `llm.max_tokens` | `200` | must be at least 1 |
 | `llm.timeout_secs` | `120` | no extra range check |
 | `llm.prompt` | built-in prompt | editable in settings |
+| `llm.context.enabled` | `true` | file only |
+| `llm.context.people` | `true` | sends the people names |
+| `llm.context.place` | `true` | sends city, state, and country |
+| `llm.context.date` | `true` | sends the local date and the part of the day |
 | `run.workers` | `1` | 1 through 64 |
 | `run.retries` | `3` | 0 through 10 |
 | `run.page_size` | `1000` | 1 through 1000, file only |
 | `run.dry_run` | `false` | skips description updates when true |
 | `ui.theme` | `btop` | `btop` or `mono` |
 
-The settings form edits the prompt, timeouts, retry count, dry-run value, theme, URLs, keys, model, workers, and max tokens. `page_size` is file-only.
+The settings form edits the prompt, the three context switches, timeouts, retry count, dry-run value, theme, URLs, keys, model, workers, and max tokens. `page_size` and `llm.context.enabled` are file-only.
+
+The three context rows sit after `max tokens` and before `theme`. They are selector rows, like `theme` and `dry run`, so the form holds them past the end of the text-field list.
 
 [`SettingsForm::to_config`](src/settings.rs) clones the saved config. It then adds the form values, parses numbers, and validates the result. `ctrl-u` clears a focused text field. The theme and dry-run rows use the left and right arrow keys or `h` and `l`.
 
@@ -401,10 +412,13 @@ Text fields accept typing, backspace, and `ctrl-u`. The theme and dry-run rows a
 ╭ settings ────────────────────────────────────────────────────────────╮
 │  immich url         https://photos.example                            │
 │  immich api key     ••••••••                         ctrl-r show     │
-│▸ prompt             Describe the subject and setting of this photo.   │
-│                     Mention important colors, objects, and actions.  │
-│                     Avoid speculation and do not add a preamble.▏    │
+│▸ prompt             Write alt text for this photo: one or two         │
+│                     plain sentences describing what is visible.      │
+│                     No preamble, no quotes.▏                         │
 │  llm timeout (s)    120                                              │
+│  context people     ( ) off   (●) on                                 │
+│  context place      ( ) off   (●) on                                 │
+│  context date       ( ) off   (●) on                                 │
 │  theme              (●) btop   ( ) mono                              │
 │  dry run            (●) off   ( ) on                                 │
 │  ctrl-t test connections   immich ✓ v3.1.0   llm ✓ 200 OK             │
@@ -461,7 +475,7 @@ Users can view and test settings during a run. They must pause the run before th
 
 Tests follow the module boundaries. They do not depend on terminal automation.
 
-**Unit tests.** Tests in [`app.rs`](src/app.rs), [`config.rs`](src/config.rs), [`settings.rs`](src/settings.rs), [`theme.rs`](src/theme.rs), and [`ui/mod.rs`](src/ui/mod.rs) cover state changes, config rules, form edits, styles, formatting, and Unicode cell widths. Tests in [`main.rs`](src/main.rs) cover key mapping, config recovery, runtime replacement, and shutdown.
+**Unit tests.** Tests in [`app.rs`](src/app.rs), [`config.rs`](src/config.rs), [`prompt.rs`](src/prompt.rs), [`settings.rs`](src/settings.rs), [`theme.rs`](src/theme.rs), and [`ui/mod.rs`](src/ui/mod.rs) cover state changes, config rules, block rendering and placeholder handling, form edits, styles, formatting, and Unicode cell widths. Tests in [`main.rs`](src/main.rs) cover key mapping, config recovery, runtime replacement, and shutdown.
 
 **HTTP client tests.** Tests beside [`ImmichClient`](src/immich.rs) and [`LlmClient`](src/llm.rs) use local Wiremock servers. They check methods, paths, query values, JSON bodies, headers, response parsing, timeouts, and temporary, permanent, and fatal errors.
 

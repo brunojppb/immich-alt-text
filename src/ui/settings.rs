@@ -9,7 +9,9 @@ use unicode_segmentation::UnicodeSegmentation;
 use super::truncate;
 use crate::app::App;
 use crate::config::ThemeName;
-use crate::settings::{prompt_layout, DRY_RUN, IMMICH_KEY, LLM_KEY, PROMPT, THEME};
+use crate::settings::{
+    prompt_layout, CONTEXT_LABELS, CONTEXT_PEOPLE, DRY_RUN, IMMICH_KEY, LLM_KEY, PROMPT, THEME,
+};
 use crate::theme::Theme;
 
 const LABEL_WIDTH: usize = 19;
@@ -19,7 +21,12 @@ pub fn render(frame: &mut Frame, app: &App, theme: &Theme) {
     let area = frame.area();
     let form = &app.settings;
     let width = area.width.saturating_sub(2).clamp(40, 78);
-    let height = (form.fields.len() as u16 + 9 + (PROMPT_HEIGHT as u16 - 1)).min(area.height);
+    // Rows beyond the fields: the context switches, theme, dry run, a blank
+    // line, the test-connections line, the message line, the box borders,
+    // and the footer row.
+    let fixed_rows = CONTEXT_LABELS.len() as u16 + 9;
+    let height =
+        (form.fields.len() as u16 + fixed_rows + (PROMPT_HEIGHT as u16 - 1)).min(area.height);
     let [v] = Layout::vertical([Constraint::Length(height)])
         .flex(Flex::Center)
         .areas(area);
@@ -112,6 +119,18 @@ pub fn render(frame: &mut Frame, app: &App, theme: &Theme) {
         }
         lines.push(Line::from(spans));
     }
+    for (offset, label) in CONTEXT_LABELS.iter().enumerate() {
+        let index = CONTEXT_PEOPLE + offset;
+        if form.focused == index {
+            focused_line = lines.len();
+        }
+        lines.push(switch_line(
+            label,
+            form.context[offset],
+            form.focused == index,
+            theme,
+        ));
+    }
     if form.focused == THEME {
         focused_line = lines.len();
     }
@@ -119,17 +138,29 @@ pub fn render(frame: &mut Frame, app: &App, theme: &Theme) {
     if form.focused == DRY_RUN {
         focused_line = lines.len();
     }
-    lines.push(dry_run_line(form, theme));
+    lines.push(switch_line(
+        "dry run",
+        form.dry_run,
+        form.focused == DRY_RUN,
+        theme,
+    ));
     lines.push(Line::default());
     lines.push(test_line(app, theme));
     lines.push(match &form.message {
         Some(msg) => Line::from(Span::styled(format!("  {msg}"), theme.err)),
         None => Line::default(),
     });
+    // A message is the scroll anchor when there is one, so it is always in
+    // view even on a short terminal; otherwise the focused row anchors it.
+    let anchor_line = if form.message.is_some() {
+        lines.len() - 1
+    } else {
+        focused_line
+    };
     let content_height = inner.height.saturating_sub(1);
     let max_scroll = lines.len().saturating_sub(content_height as usize);
     let visible_focus_offset = content_height.saturating_sub(1) as usize;
-    let mut scroll = focused_line.saturating_sub(visible_focus_offset);
+    let mut scroll = anchor_line.saturating_sub(visible_focus_offset);
     scroll = scroll.min(max_scroll);
     let content = Rect {
         height: content_height,
@@ -156,10 +187,9 @@ pub fn render(frame: &mut Frame, app: &App, theme: &Theme) {
     frame.render_widget(Paragraph::new(Line::from(spans)), footer);
 }
 
-fn dry_run_line(form: &crate::settings::SettingsForm, theme: &Theme) -> Line<'static> {
-    let focused = form.focused == DRY_RUN;
-    let selected = |enabled: bool| {
-        if form.dry_run == enabled {
+fn switch_line(label: &str, on: bool, focused: bool, theme: &Theme) -> Line<'static> {
+    let selected = |value: bool| {
+        if on == value {
             if focused {
                 theme.accent
             } else {
@@ -169,16 +199,13 @@ fn dry_run_line(form: &crate::settings::SettingsForm, theme: &Theme) -> Line<'st
             theme.dim
         }
     };
-    let option = |enabled: bool, label: &str| {
-        let marker = if form.dry_run == enabled { "●" } else { " " };
-        Span::styled(format!("({marker}) {label}"), selected(enabled))
+    let option = |value: bool, text: &str| {
+        let marker = if on == value { "●" } else { " " };
+        Span::styled(format!("({marker}) {text}"), selected(value))
     };
     Line::from(vec![
         Span::styled(if focused { "▸ " } else { "  " }, theme.accent),
-        Span::styled(
-            format!("{:<width$}", "dry run", width = LABEL_WIDTH),
-            theme.label,
-        ),
+        Span::styled(format!("{label:<width$}", width = LABEL_WIDTH), theme.label),
         option(false, "off"),
         Span::styled("   ", theme.dim),
         option(true, "on"),

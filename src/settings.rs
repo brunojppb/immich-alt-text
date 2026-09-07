@@ -17,11 +17,22 @@ pub const LLM_TIMEOUT: usize = 7;
 pub const WORKERS: usize = 8;
 pub const RETRIES: usize = 9;
 pub const MAX_TOKENS: usize = 10;
-pub const THEME: usize = 11;
-pub const DRY_RUN: usize = 12;
+pub const CONTEXT_PEOPLE: usize = 11;
+pub const CONTEXT_PLACE: usize = 12;
+pub const CONTEXT_DATE: usize = 13;
+pub const THEME: usize = 14;
+pub const DRY_RUN: usize = 15;
 
 const FIELD_COUNT: usize = DRY_RUN + 1;
 pub const PROMPT_WRAP_WIDTH: usize = 43;
+
+/// Row labels for the context switches, in row order.
+pub const CONTEXT_LABELS: [&str; 3] = ["context people", "context place", "context date"];
+
+/// True when `index` is one of the context switch rows.
+pub fn is_context_row(index: usize) -> bool {
+    (CONTEXT_PEOPLE..=CONTEXT_DATE).contains(&index)
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Field {
@@ -46,6 +57,8 @@ pub struct SettingsForm {
     pub fields: Vec<Field>,
     pub theme: ThemeName,
     pub dry_run: bool,
+    /// The three context switches, in row order: people, place, date.
+    pub context: [bool; 3],
     /// Cursor position in the prompt, measured in Unicode grapheme clusters.
     pub prompt_cursor: usize,
     prompt_width: Cell<usize>,
@@ -81,11 +94,16 @@ impl SettingsForm {
             field("retries", cfg.run.retries.to_string(), false),
             field("max tokens", cfg.llm.max_tokens.to_string(), false),
         ];
-        debug_assert_eq!(fields.len() + 2, FIELD_COUNT);
+        debug_assert_eq!(fields.len() + 5, FIELD_COUNT);
         Self {
             fields,
             theme: cfg.ui.theme,
             dry_run: cfg.run.dry_run,
+            context: [
+                cfg.llm.context.people,
+                cfg.llm.context.place,
+                cfg.llm.context.date,
+            ],
             prompt_cursor: cfg.llm.prompt.graphemes(true).count(),
             prompt_width: Cell::new(PROMPT_WRAP_WIDTH),
             focused: 0,
@@ -170,7 +188,8 @@ impl SettingsForm {
             layout.row_starts[target_row] + layout.cursor_column.min(target_column);
     }
 
-    /// Clears the focused text field. Theme selection is intentionally not text-editable.
+    /// Clears the focused text field. The theme, dry run, and context switch rows are
+    /// intentionally not text-editable.
     pub fn clear(&mut self) {
         if self.focused == PROMPT {
             self.fields[PROMPT].value.clear();
@@ -223,6 +242,23 @@ impl SettingsForm {
 
     pub fn select_dry_run_prev(&mut self) {
         self.dry_run = false;
+    }
+
+    /// Row index inside `context`, when a context row has focus.
+    fn context_index(&self) -> Option<usize> {
+        is_context_row(self.focused).then(|| self.focused - CONTEXT_PEOPLE)
+    }
+
+    pub fn select_context_next(&mut self) {
+        if let Some(index) = self.context_index() {
+            self.context[index] = true;
+        }
+    }
+
+    pub fn select_context_prev(&mut self) {
+        if let Some(index) = self.context_index() {
+            self.context[index] = false;
+        }
     }
 
     pub fn toggle_secrets(&mut self) {
@@ -283,6 +319,9 @@ impl SettingsForm {
             .map_err(|_| "max tokens must be a whole number".to_string())?;
         cfg.ui.theme = self.theme;
         cfg.run.dry_run = self.dry_run;
+        cfg.llm.context.people = self.context[0];
+        cfg.llm.context.place = self.context[1];
+        cfg.llm.context.date = self.context[2];
         cfg.validate().map_err(|error| error.to_string())?;
         Ok(cfg)
     }
@@ -397,6 +436,16 @@ mod tests {
         assert_eq!(f.focused, DRY_RUN);
         f.focus_next();
         assert_eq!(f.focused, IMMICH_URL);
+    }
+
+    #[test]
+    fn focus_prev_reaches_every_context_row() {
+        let mut f = SettingsForm::from_config(&base());
+        f.focused = THEME;
+        for expected in [CONTEXT_DATE, CONTEXT_PLACE, CONTEXT_PEOPLE] {
+            f.focus_prev();
+            assert_eq!(f.focused, expected);
+        }
     }
 
     #[test]
@@ -521,6 +570,56 @@ mod tests {
         assert_eq!(cfg.immich.timeout_secs, 45);
         assert_eq!(cfg.llm.timeout_secs, 180);
         assert_eq!(cfg.ui.theme, ThemeName::Mono);
+    }
+
+    #[test]
+    fn context_rows_take_their_values_from_the_config() {
+        let mut cfg = base();
+        cfg.llm.context.place = false;
+        let f = SettingsForm::from_config(&cfg);
+        assert_eq!(f.context, [true, false, true]);
+    }
+
+    #[test]
+    fn context_selection_toggles_without_text_editing() {
+        let mut f = SettingsForm::from_config(&base());
+        f.focused = CONTEXT_PLACE;
+        f.select_context_prev();
+        assert_eq!(f.context, [true, false, true]);
+        f.select_context_next();
+        assert_eq!(f.context, [true, true, true]);
+        f.insert('x');
+        assert!(f.fields.iter().all(|field| !field.value.ends_with('x')));
+    }
+
+    #[test]
+    fn focus_reaches_every_context_row() {
+        let mut f = SettingsForm::from_config(&base());
+        f.focused = MAX_TOKENS;
+        for expected in [CONTEXT_PEOPLE, CONTEXT_PLACE, CONTEXT_DATE, THEME, DRY_RUN] {
+            f.focus_next();
+            assert_eq!(f.focused, expected);
+        }
+    }
+
+    #[test]
+    fn to_config_persists_the_context_switches() {
+        let mut f = SettingsForm::from_config(&base());
+        f.context = [true, false, false];
+        let cfg = f.to_config(&base()).unwrap();
+        assert!(cfg.llm.context.people);
+        assert!(!cfg.llm.context.place);
+        assert!(!cfg.llm.context.date);
+    }
+
+    #[test]
+    fn to_config_keeps_context_enabled_as_a_file_only_value() {
+        let mut base = base();
+        base.llm.context.enabled = false;
+        let mut f = SettingsForm::from_config(&base);
+        f.context = [true, true, true];
+        let cfg = f.to_config(&base).unwrap();
+        assert!(!cfg.llm.context.enabled);
     }
 
     #[test]

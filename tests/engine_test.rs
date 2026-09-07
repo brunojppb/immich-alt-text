@@ -3,7 +3,9 @@ use std::sync::{Arc, Condvar, Mutex as StdMutex};
 use std::time::Duration;
 
 use base64::Engine as _;
-use immich_alt_text::config::{Config, ImmichConfig, LlmConfig, RunConfig, UiConfig};
+use immich_alt_text::config::{
+    Config, ContextConfig, ImmichConfig, LlmConfig, RunConfig, UiConfig,
+};
 use immich_alt_text::engine::{self, EngineOptions};
 use immich_alt_text::events::{Command, Event, Stage};
 use serde_json::json;
@@ -37,6 +39,7 @@ fn config_with_run(
             max_tokens: 50,
             timeout_secs: 5,
             prompt: "describe".into(),
+            context: ContextConfig::default(),
         },
         run: RunConfig {
             workers,
@@ -177,6 +180,7 @@ async fn mount_search_page(
         .and(body_json(json!({
             "type": "IMAGE",
             "withExif": true,
+            "withPeople": true,
             "size": size,
             "page": page,
             "order": "desc",
@@ -1419,5 +1423,72 @@ async fn restart_start_is_live_when_previous_run_finished_on_saturated_events() 
         .expect("restart Start blocked on the previous run's event delivery");
     wait_for_request_count(&immich, 2).await;
 
+    handle.shutdown(Duration::from_secs(1)).await;
+}
+
+#[tokio::test]
+async fn the_completion_request_carries_the_person_name() {
+    let immich = MockServer::start().await;
+    let llm = MockServer::start().await;
+    // A named, non-hidden person and a city, so the request below can assert
+    // the completion request carries "People: Ana".
+    Mock::given(method("POST"))
+        .and(path("/api/search/metadata"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "assets": {
+                "items": [{
+                    "id": "a1",
+                    "originalFileName": "IMG_1.HEIC",
+                    "people": [
+                        { "name": "Ana", "isHidden": false }
+                    ],
+                    "exifInfo": {
+                        "description": null,
+                        "city": "Sintra"
+                    }
+                }],
+                "nextPage": null
+            }
+        })))
+        .mount(&immich)
+        .await;
+    Mock::given(method("GET"))
+        .and(path_regex(r"^/api/assets/[^/]+/thumbnail$"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(JPEG.to_vec()))
+        .mount(&immich)
+        .await;
+    Mock::given(method("PUT"))
+        .and(path("/api/assets/a1"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&immich)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .and(body_string_contains("People: Ana"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "choices": [{ "message": { "content": "Ana on a dock." } }]
+        })))
+        .expect(1)
+        .mount(&llm)
+        .await;
+
+    let (tx, mut rx) = mpsc::channel(256);
+    let handle = engine::spawn_with(config(&immich, &llm), tx, fast()).unwrap();
+    handle.send(Command::Start).await;
+    let events = tokio::time::timeout(
+        Duration::from_secs(2),
+        collect_until(&mut rx, |e| matches!(e, Event::RunFinished { .. })),
+    )
+    .await
+    .expect("run did not finish: the completion mock likely did not match");
+
+    assert!(matches!(
+        events.last().unwrap(),
+        Event::RunFinished {
+            done: 1,
+            failed: 0,
+            ..
+        }
+    ));
     handle.shutdown(Duration::from_secs(1)).await;
 }

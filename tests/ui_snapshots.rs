@@ -170,6 +170,16 @@ fn settings_screen_with_error_message() {
 }
 
 #[test]
+fn settings_screen_message_visible_on_a_short_terminal() {
+    let now = Instant::now();
+    let mut app = App::new(config(), true, false);
+    app.settings.message = Some("invalid config: run.workers must be at least 1".into());
+    let rendered = render_to_string(80, 24, &app, now);
+    assert!(rendered.contains("invalid config: run.workers must be at least 1"));
+    snapshot("settings_message_80x24", 80, 24, &app, now);
+}
+
+#[test]
 fn settings_screen_mono_theme_selection() {
     let now = Instant::now();
     let mut app = App::new(config(), true, false);

@@ -12,7 +12,7 @@ For each image without a description, the application:
 
 1. Finds the image in Immich.
 2. Downloads the preview JPEG.
-3. Sends the image to an OpenAI-compatible vision model.
+3. Sends the image and a short block of library context to an OpenAI-compatible vision model.
 4. Writes the returned description to Immich.
 
 The application does not change images that already have descriptions. Immich stores the progress. You can stop a run and start it again later.
@@ -27,6 +27,37 @@ You can enable dry-run mode in either way:
 - Set `dry_run = true` in the settings screen.
 
 The CLI flag applies only to the current run. It overrides the saved setting. The settings value is saved for future runs.
+
+### Library context
+
+Immich already knows who is in a photo and where it was taken. The application
+reads that data from the same search it already runs, then sends it to the model
+with the image:
+
+```text
+Context from the photo library. Use it only where the image supports it. Name
+the people when they are in the photo. Never list this context back:
+People: Ana, Marco
+Place: Sintra, Lisbon, Portugal
+Taken: Friday 14 June 2019, evening
+```
+
+The block leads with its own instruction, so your prompt does not need to
+mention the context. The application appends the block after your prompt. To place it yourself,
+put `{{context}}` on its own line in the prompt. The block can run several
+lines. It replaces the whole placeholder line. Two placeholders each get
+their own copy of the block.
+
+Each line in the block has a switch. A line with no data disappears. With
+every switch off, the block is empty. A prompt with no placeholder stays as
+you wrote it. A prompt that holds `{{context}}` loses that line, because an
+empty block still replaces it.
+
+#### Privacy
+
+The names and places travel to the address in `llm.base_url`. A model on your
+own machine keeps them there. A remote provider receives them, so turn the
+switches off before you point the application at one.
 
 ## Requirements
 
@@ -127,7 +158,7 @@ immich-alt-text --config target/demo-config.toml
 | settings | `ctrl-r` | show or hide API keys |
 | settings | `ctrl-t` | test both connections |
 | settings | `ctrl-s` | save and return to the run screen |
-| settings | `←` `→` or `h` `l` | select the theme or dry-run value |
+| settings | `←` `→` or `h` `l` | set a switch: context, theme, or dry run |
 | settings | `←` `→` `↑` `↓` | move in the prompt |
 | settings | `enter` | add a line break in the prompt |
 | settings | `ctrl-u` | clear the focused text field |
@@ -152,6 +183,12 @@ Write alt text for this photo: one or two plain sentences describing what is
 visible. No preamble, no quotes, no "This image shows".
 """
 
+[llm.context]
+enabled = true          # send the library context with the image
+people = true           # names Immich recognised in the photo
+place = true            # city, state, country
+date = true             # local date and part of the day
+
 [run]
 workers = 1             # parallel LLM calls, 1-64
 retries = 3             # 0-10 retries; default backoff is 2 s, 4 s, 8 s
@@ -162,7 +199,7 @@ dry_run = false         # do not update Immich when true
 theme = "btop"          # or "mono"
 ```
 
-`page_size` is file-only. The settings screen also lets you change the prompt, Immich and LLM timeouts, retry count, dry-run mode, and UI theme.
+`page_size` and `llm.context.enabled` are file-only. The settings screen also lets you change the prompt, the three context switches, Immich and LLM timeouts, retry count, dry-run mode, and UI theme.
 
 The prompt editor supports multiple lines. Use the arrow keys to move in the prompt. Press `enter` to add a line break. Press `ctrl-u` to replace the prompt.
 

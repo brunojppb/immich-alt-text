@@ -19,12 +19,26 @@ pub enum ImmichError {
     Fatal(String),
 }
 
+/// What Immich already knows about a photo, ready for the prompt.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AssetContext {
+    /// Named people, hidden people removed.
+    pub people: Vec<String>,
+    /// City, state, and country, in that order.
+    pub place: Vec<String>,
+    /// Local wall-clock time the camera recorded.
+    pub taken: Option<chrono::NaiveDateTime>,
+}
+
+const MAX_PEOPLE: usize = 6;
+
 /// One photo as the engine sees it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Asset {
     pub id: String,
     pub name: String,
     pub description: Option<String>,
+    pub context: AssetContext,
 }
 
 impl Asset {
@@ -111,6 +125,7 @@ impl ImmichClient {
         let body = serde_json::json!({
             "type": "IMAGE",
             "withExif": true,
+            "withPeople": true,
             "size": size,
             "page": page,
             "order": "desc",
@@ -127,10 +142,20 @@ impl ImmichClient {
             .assets
             .items
             .into_iter()
-            .map(|asset| Asset {
-                id: asset.id,
-                name: asset.original_file_name,
-                description: asset.exif_info.and_then(|exif| exif.description),
+            .map(|asset| {
+                let place = place_parts(asset.exif_info.as_ref());
+                let people = people_names(asset.people.unwrap_or_default());
+                let taken = taken_at(asset.local_date_time.as_deref());
+                Asset {
+                    id: asset.id,
+                    name: asset.original_file_name,
+                    description: asset.exif_info.and_then(|exif| exif.description),
+                    context: AssetContext {
+                        people,
+                        place,
+                        taken,
+                    },
+                }
             })
             .collect();
         let next_page =
@@ -190,11 +215,68 @@ struct AssetDto {
     id: String,
     original_file_name: String,
     exif_info: Option<ExifDto>,
+    people: Option<Vec<PersonDto>>,
+    local_date_time: Option<String>,
 }
 
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PersonDto {
+    name: Option<String>,
+    is_hidden: Option<bool>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct ExifDto {
     description: Option<String>,
+    city: Option<String>,
+    state: Option<String>,
+    country: Option<String>,
+}
+
+fn people_names(people: Vec<PersonDto>) -> Vec<String> {
+    people
+        .into_iter()
+        .filter(|person| !person.is_hidden.unwrap_or(false))
+        .filter_map(|person| {
+            let name = person.name.unwrap_or_default().trim().to_string();
+            (!name.is_empty()).then_some(name)
+        })
+        .take(MAX_PEOPLE)
+        .collect()
+}
+
+fn place_parts(exif: Option<&ExifDto>) -> Vec<String> {
+    let mut parts = Vec::new();
+    let Some(exif) = exif else {
+        return parts;
+    };
+    for value in [&exif.city, &exif.state, &exif.country] {
+        let Some(value) = value.as_deref().map(str::trim) else {
+            continue;
+        };
+        if value.is_empty()
+            || parts
+                .last()
+                .is_some_and(|last: &String| last.eq_ignore_ascii_case(value))
+        {
+            continue;
+        }
+        parts.push(value.to_string());
+    }
+    parts
+}
+
+/// Parses Immich's local date-time string into a naive date and time.
+fn taken_at(raw: Option<&str>) -> Option<chrono::NaiveDateTime> {
+    let raw = raw?;
+    // The offset is part of the wall-clock value Immich sends, so drop it
+    // instead of converting to UTC.
+    if let Ok(parsed) = chrono::DateTime::parse_from_rfc3339(raw) {
+        return Some(parsed.naive_local());
+    }
+    chrono::NaiveDateTime::parse_from_str(raw, "%Y-%m-%dT%H:%M:%S%.f").ok()
 }
 
 fn transport(error: reqwest::Error) -> ImmichError {
@@ -228,7 +310,7 @@ mod tests {
     use std::time::Duration;
 
     use serde_json::json;
-    use wiremock::matchers::{body_json, header, method, path, query_param};
+    use wiremock::matchers::{body_json, body_partial_json, header, method, path, query_param};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     async fn client(server: &MockServer) -> ImmichClient {
@@ -272,7 +354,7 @@ mod tests {
             .and(path("/api/search/metadata"))
             .and(header("x-api-key", "k"))
             .and(body_json(json!({
-                "type": "IMAGE", "withExif": true, "size": 2, "page": 1, "order": "desc"
+                "type": "IMAGE", "withExif": true, "withPeople": true, "size": 2, "page": 1, "order": "desc"
             })))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
                 "albums": { "count": 0, "items": [], "facets": [], "total": 0 },
@@ -343,6 +425,7 @@ mod tests {
             id: "x".into(),
             name: "x".into(),
             description: Some("   ".into()),
+            context: AssetContext::default(),
         };
         assert!(a.needs_description());
     }
@@ -491,5 +574,183 @@ mod tests {
         let c = ImmichClient::new(&server.uri(), "k", Duration::from_millis(20)).unwrap();
         let err = c.version().await.unwrap_err();
         assert!(matches!(err, ImmichError::Transient(_)), "{err}");
+    }
+
+    #[tokio::test]
+    async fn the_search_request_asks_for_people() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/search/metadata"))
+            .and(body_partial_json(serde_json::json!({ "withPeople": true })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "assets": { "items": [], "nextPage": null }
+            })))
+            .mount(&server)
+            .await;
+
+        let client = ImmichClient::new(&server.uri(), "key", Duration::from_secs(5)).unwrap();
+        client.list_images(1, 10).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_page_fills_the_asset_context() {
+        let server = MockServer::start().await;
+        let items = serde_json::json!({
+            "assets": {
+                "items": [{
+                    "id": "a1",
+                    "originalFileName": "IMG_1.jpg",
+                    "localDateTime": "2019-06-14T19:23:00.000Z",
+                    "people": [
+                        { "name": "Ana", "isHidden": false },
+                        { "name": "Secret", "isHidden": true },
+                        { "name": "   ", "isHidden": false },
+                        { "name": "Marco", "isHidden": false }
+                    ],
+                    "exifInfo": {
+                        "description": null,
+                        "city": "Sintra",
+                        "state": "Lisbon",
+                        "country": "Portugal"
+                    }
+                }],
+                "nextPage": null
+            }
+        });
+        Mock::given(method("POST"))
+            .and(path("/api/search/metadata"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(items))
+            .mount(&server)
+            .await;
+
+        let client = ImmichClient::new(&server.uri(), "key", Duration::from_secs(5)).unwrap();
+        let page = client.list_images(1, 10).await.unwrap();
+        let context = &page.items[0].context;
+        assert_eq!(context.people, vec!["Ana".to_string(), "Marco".to_string()]);
+        assert_eq!(
+            context.place,
+            vec![
+                "Sintra".to_string(),
+                "Lisbon".to_string(),
+                "Portugal".to_string()
+            ]
+        );
+        assert_eq!(
+            context.taken.map(|taken| taken.to_string()),
+            Some("2019-06-14 19:23:00".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn the_context_survives_missing_metadata() {
+        let server = MockServer::start().await;
+        let items = serde_json::json!({
+            "assets": {
+                "items": [{ "id": "a1", "originalFileName": "IMG_1.jpg" }],
+                "nextPage": null
+            }
+        });
+        Mock::given(method("POST"))
+            .and(path("/api/search/metadata"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(items))
+            .mount(&server)
+            .await;
+
+        let client = ImmichClient::new(&server.uri(), "key", Duration::from_secs(5)).unwrap();
+        let page = client.list_images(1, 10).await.unwrap();
+        assert_eq!(page.items[0].context, AssetContext::default());
+    }
+
+    #[tokio::test]
+    async fn an_explicit_null_people_list_is_an_empty_context() {
+        let server = MockServer::start().await;
+        let items = serde_json::json!({
+            "assets": {
+                "items": [{ "id": "a1", "originalFileName": "IMG_1.jpg", "people": null }],
+                "nextPage": null
+            }
+        });
+        Mock::given(method("POST"))
+            .and(path("/api/search/metadata"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(items))
+            .mount(&server)
+            .await;
+
+        let client = ImmichClient::new(&server.uri(), "key", Duration::from_secs(5)).unwrap();
+        let page = client.list_images(1, 10).await.unwrap();
+        assert_eq!(page.items[0].context, AssetContext::default());
+    }
+
+    #[tokio::test]
+    async fn an_explicit_null_is_hidden_keeps_the_person() {
+        let server = MockServer::start().await;
+        let items = serde_json::json!({
+            "assets": {
+                "items": [{
+                    "id": "a1",
+                    "originalFileName": "IMG_1.jpg",
+                    "people": [{ "name": "Ana", "isHidden": null }]
+                }],
+                "nextPage": null
+            }
+        });
+        Mock::given(method("POST"))
+            .and(path("/api/search/metadata"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(items))
+            .mount(&server)
+            .await;
+
+        let client = ImmichClient::new(&server.uri(), "key", Duration::from_secs(5)).unwrap();
+        let page = client.list_images(1, 10).await.unwrap();
+        assert_eq!(page.items[0].context.people, vec!["Ana".to_string()]);
+    }
+
+    #[test]
+    fn seven_people_produce_six_names() {
+        let people: Vec<PersonDto> = (0..7)
+            .map(|i| PersonDto {
+                name: Some(format!("P{i}")),
+                is_hidden: Some(false),
+            })
+            .collect();
+        assert_eq!(
+            people_names(people),
+            vec!["P0", "P1", "P2", "P3", "P4", "P5"]
+        );
+    }
+
+    #[test]
+    fn a_repeated_place_part_appears_once() {
+        let exif = ExifDto {
+            description: None,
+            city: Some("Lisbon".into()),
+            state: Some("Lisbon".into()),
+            country: Some("Portugal".into()),
+        };
+        assert_eq!(
+            place_parts(Some(&exif)),
+            vec!["Lisbon".to_string(), "Portugal".to_string()]
+        );
+    }
+
+    #[test]
+    fn a_repeated_place_part_with_different_case_appears_once() {
+        let exif = ExifDto {
+            description: None,
+            city: Some("Lisbon".into()),
+            state: None,
+            country: Some("lisbon".into()),
+        };
+        assert_eq!(place_parts(Some(&exif)), vec!["Lisbon".to_string()]);
+    }
+
+    #[test]
+    fn an_unparsable_date_is_none() {
+        assert!(taken_at(Some("not a date")).is_none());
+        assert!(taken_at(None).is_none());
+        assert_eq!(
+            taken_at(Some("2019-06-14T19:23:00")).map(|t| t.to_string()),
+            Some("2019-06-14 19:23:00".to_string())
+        );
     }
 }
