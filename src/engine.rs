@@ -473,8 +473,8 @@ impl Engine {
             .await;
     }
 
-    // Clippy's threshold, not a design problem: these are the run-scoped
-    // values each worker clones.
+    // A run-scope struct would be the tidier shape here. It touches `run`,
+    // `start_run` and `worker`, so it is left for its own change.
     #[allow(clippy::too_many_arguments)]
     async fn worker(
         self: Arc<Self>,
