@@ -708,6 +708,69 @@ async fn a_failing_tag_upsert_stops_the_run_before_any_asset_starts() {
 }
 
 #[tokio::test]
+async fn overwrite_mode_tags_every_asset_and_accepts_a_duplicate_tag() {
+    let immich = MockServer::start().await;
+    let llm = MockServer::start().await;
+    mount_immich_basics(
+        &immich,
+        &[
+            ("a1", "IMG_1.HEIC", None),
+            ("a2", "IMG_2.HEIC", Some("a dog")),
+        ],
+    )
+    .await;
+    mount_tag_upsert(&immich, "gen-desc", "tag-1").await;
+    Mock::given(method("PUT"))
+        .and(path("/api/assets/a1"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+        .expect(1)
+        .mount(&immich)
+        .await;
+    Mock::given(method("PUT"))
+        .and(path("/api/assets/a2"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+        .expect(1)
+        .mount(&immich)
+        .await;
+    // A second overwrite run over a tagged library gets "duplicate" for every
+    // asset. The client reads the outcome, not the id, so one body serves both.
+    Mock::given(method("PUT"))
+        .and(path("/api/tags/tag-1/assets"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+            { "id": "a1", "success": false, "error": "duplicate" }
+        ])))
+        .expect(2)
+        .mount(&immich)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(completion("A better sentence.")))
+        .expect(2)
+        .mount(&llm)
+        .await;
+
+    let mut cfg = config(&immich, &llm);
+    cfg.run.overwrite = true;
+    cfg.immich.tag = "gen-desc".into();
+    let (tx, mut rx) = mpsc::channel(256);
+    let handle = engine::spawn_with(cfg, tx, fast()).unwrap();
+    handle.send(Command::Start).await;
+    let events = collect_until(&mut rx, |e| matches!(e, Event::RunFinished { .. })).await;
+
+    assert!(!events
+        .iter()
+        .any(|e| matches!(e, Event::AssetFailed { .. })));
+    match events.last().unwrap() {
+        Event::RunFinished { done, failed, .. } => {
+            assert_eq!(*done, 2);
+            assert_eq!(*failed, 0);
+        }
+        other => panic!("unexpected last event {other:?}"),
+    }
+    handle.shutdown(Duration::from_secs(1)).await;
+}
+
+#[tokio::test]
 async fn retries_transient_llm_errors_then_succeeds() {
     let immich = MockServer::start().await;
     let llm = MockServer::start().await;
