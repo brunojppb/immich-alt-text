@@ -351,6 +351,70 @@ async fn skips_described_assets_and_writes_the_rest() {
 }
 
 #[tokio::test]
+async fn overwrite_mode_describes_assets_that_already_have_a_description() {
+    let immich = MockServer::start().await;
+    let llm = MockServer::start().await;
+    mount_immich_basics(
+        &immich,
+        &[
+            ("a1", "IMG_1.HEIC", None),
+            ("a2", "IMG_2.HEIC", Some("a dog")),
+        ],
+    )
+    .await;
+    Mock::given(method("PUT"))
+        .and(path("/api/assets/a1"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+        .expect(1)
+        .mount(&immich)
+        .await;
+    Mock::given(method("PUT"))
+        .and(path("/api/assets/a2"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+        .expect(1)
+        .mount(&immich)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(completion("A better sentence.")))
+        .expect(2)
+        .mount(&llm)
+        .await;
+
+    let mut cfg = config(&immich, &llm);
+    cfg.run.overwrite = true;
+    let (tx, mut rx) = mpsc::channel(256);
+    let handle = engine::spawn_with(cfg, tx, fast()).unwrap();
+    handle.send(Command::Start).await;
+    let events = collect_until(&mut rx, |e| matches!(e, Event::RunFinished { .. })).await;
+
+    assert_eq!(
+        events[0],
+        Event::PageLoaded {
+            scanned: 2,
+            queued: 2
+        }
+    );
+    let mut done: Vec<&str> = events
+        .iter()
+        .filter_map(|e| match e {
+            Event::AssetDone { name, .. } => Some(name.as_str()),
+            _ => None,
+        })
+        .collect();
+    done.sort_unstable();
+    assert_eq!(done, vec!["IMG_1.HEIC", "IMG_2.HEIC"]);
+    match events.last().unwrap() {
+        Event::RunFinished { done, failed, .. } => {
+            assert_eq!(*done, 2);
+            assert_eq!(*failed, 0);
+        }
+        other => panic!("unexpected last event {other:?}"),
+    }
+    handle.shutdown(Duration::from_secs(1)).await;
+}
+
+#[tokio::test]
 async fn dry_run_describes_assets_without_writing_to_immich() {
     let immich = MockServer::start().await;
     let llm = MockServer::start().await;

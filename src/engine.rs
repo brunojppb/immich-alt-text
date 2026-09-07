@@ -415,11 +415,15 @@ impl Engine {
             };
 
             scanned = scanned.saturating_add(page_data.items.len() as u64);
-            let wanted: Vec<Asset> = page_data
-                .items
-                .into_iter()
-                .filter(|asset| asset.needs_description())
-                .collect();
+            let wanted: Vec<Asset> = if self.config.run.overwrite {
+                page_data.items
+            } else {
+                page_data
+                    .items
+                    .into_iter()
+                    .filter(|asset| asset.needs_description())
+                    .collect()
+            };
             queued = queued.saturating_add(wanted.len() as u64);
             let _ = self
                 .emit_run(&token, Event::PageLoaded { scanned, queued })
