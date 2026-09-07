@@ -2,7 +2,6 @@
 source: tests/ui_snapshots.rs
 expression: terminal.backend()
 ---
-"                                                                                "
 " ╭ settings ──────────────────────────────────────────────────────────────────╮ "
 " │  immich url         https://photos.home.lan                                │ "
 " │  immich api key     ••••••••••                                 ctrl-r show │ "
@@ -18,11 +17,12 @@ expression: terminal.backend()
 " │  workers            1                                                      │ "
 " │  retries            3                                                      │ "
 " │  max tokens         200                                                    │ "
+" │  context people     ( ) off   (●) on                                       │ "
+" │  context place      ( ) off   (●) on                                       │ "
+" │  context date       ( ) off   (●) on                                       │ "
 " │  theme              (●) btop   ( ) mono                                    │ "
 " │  dry run            (●) off   ( ) on                                       │ "
 " │                                                                            │ "
 " │  ctrl-t test connections                                                   │ "
-" │                                                                            │ "
-" │                                                                            │ "
 " │ ctrl-s save    ctrl-t test    ← → select    ctrl-u clear    esc back       │ "
 " ╰────────────────────────────────────────────────────────────────────────────╯ "
