@@ -195,6 +195,49 @@ impl ImmichClient {
         .await
         .map(|_| ())
     }
+
+    /// Creates the tag when it does not exist. Returns the tag id.
+    pub async fn upsert_tag(&self, value: &str) -> Result<String, ImmichError> {
+        let resp = self
+            .send(
+                self.http
+                    .put(format!("{}/tags", self.base))
+                    .json(&serde_json::json!({ "tags": [value] })),
+            )
+            .await?;
+        let tags: Vec<TagDto> = resp.json().await.map_err(bad_body)?;
+        // A nested value makes Immich create the parent tags too, so match the
+        // value instead of taking the first entry.
+        tags.into_iter()
+            .find(|tag| tag.value == value)
+            .map(|tag| tag.id)
+            .ok_or_else(|| {
+                ImmichError::Permanent(format!("tag {value} is missing from the response"))
+            })
+    }
+
+    /// Adds one asset to the tag.
+    pub async fn tag_asset(&self, tag_id: &str, asset_id: &str) -> Result<(), ImmichError> {
+        let resp = self
+            .send(
+                self.http
+                    .put(format!("{}/tags/{tag_id}/assets", self.base))
+                    .json(&serde_json::json!({ "ids": [asset_id] })),
+            )
+            .await?;
+        let results: Vec<BulkIdDto> = resp.json().await.map_err(bad_body)?;
+        // Immich answers 200 and reports a per-asset failure in the body.
+        let Some(result) = results.into_iter().next() else {
+            return Err(ImmichError::Permanent("empty tag response".into()));
+        };
+        if result.success || result.error.as_deref() == Some("duplicate") {
+            return Ok(());
+        }
+        Err(ImmichError::Permanent(format!(
+            "tag failed: {}",
+            result.error.unwrap_or_else(|| "unknown".into())
+        )))
+    }
 }
 
 #[derive(Deserialize)]
@@ -233,6 +276,18 @@ struct ExifDto {
     city: Option<String>,
     state: Option<String>,
     country: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct TagDto {
+    id: String,
+    value: String,
+}
+
+#[derive(Deserialize)]
+struct BulkIdDto {
+    success: bool,
+    error: Option<String>,
 }
 
 fn people_names(people: Vec<PersonDto>) -> Vec<String> {
@@ -752,5 +807,153 @@ mod tests {
             taken_at(Some("2019-06-14T19:23:00")).map(|t| t.to_string()),
             Some("2019-06-14 19:23:00".to_string())
         );
+    }
+
+    #[tokio::test]
+    async fn upsert_tag_sends_the_value_and_returns_the_id() {
+        let server = MockServer::start().await;
+        Mock::given(method("PUT"))
+            .and(path("/api/tags"))
+            .and(header("x-api-key", "k"))
+            .and(body_json(json!({ "tags": ["gen-desc"] })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+                { "id": "tag-1", "value": "gen-desc", "name": "gen-desc" }
+            ])))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let id = client(&server).await.upsert_tag("gen-desc").await.unwrap();
+        assert_eq!(id, "tag-1");
+    }
+
+    #[tokio::test]
+    async fn upsert_tag_picks_the_requested_value_from_the_response() {
+        let server = MockServer::start().await;
+        // A nested value makes Immich create the parent too, so the response
+        // can hold more than the requested tag.
+        Mock::given(method("PUT"))
+            .and(path("/api/tags"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+                { "id": "tag-parent", "value": "ai", "name": "ai" },
+                { "id": "tag-child", "value": "ai/alt-text", "name": "alt-text" }
+            ])))
+            .mount(&server)
+            .await;
+
+        let id = client(&server).await.upsert_tag("ai/alt-text").await.unwrap();
+        assert_eq!(id, "tag-child");
+    }
+
+    #[tokio::test]
+    async fn upsert_tag_without_the_requested_value_is_permanent() {
+        let server = MockServer::start().await;
+        Mock::given(method("PUT"))
+            .and(path("/api/tags"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!([])))
+            .mount(&server)
+            .await;
+
+        let err = client(&server).await.upsert_tag("gen-desc").await.unwrap_err();
+        assert!(matches!(err, ImmichError::Permanent(_)), "{err}");
+        assert!(err.to_string().contains("gen-desc"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn upsert_tag_maps_forbidden_to_fatal() {
+        let server = MockServer::start().await;
+        Mock::given(method("PUT"))
+            .and(path("/api/tags"))
+            .respond_with(ResponseTemplate::new(403))
+            .mount(&server)
+            .await;
+
+        let err = client(&server).await.upsert_tag("gen-desc").await.unwrap_err();
+        assert!(matches!(err, ImmichError::Fatal(_)), "{err}");
+    }
+
+    #[tokio::test]
+    async fn tag_asset_sends_the_asset_id() {
+        let server = MockServer::start().await;
+        Mock::given(method("PUT"))
+            .and(path("/api/tags/tag-1/assets"))
+            .and(header("x-api-key", "k"))
+            .and(body_json(json!({ "ids": ["a1"] })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+                { "id": "a1", "success": true }
+            ])))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        client(&server).await.tag_asset("tag-1", "a1").await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn tag_asset_treats_a_duplicate_as_success() {
+        let server = MockServer::start().await;
+        Mock::given(method("PUT"))
+            .and(path("/api/tags/tag-1/assets"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+                { "id": "a1", "success": false, "error": "duplicate" }
+            ])))
+            .mount(&server)
+            .await;
+
+        client(&server).await.tag_asset("tag-1", "a1").await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn tag_asset_reports_another_body_error_as_permanent() {
+        let server = MockServer::start().await;
+        Mock::given(method("PUT"))
+            .and(path("/api/tags/tag-1/assets"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+                { "id": "a1", "success": false, "error": "not_found" }
+            ])))
+            .mount(&server)
+            .await;
+
+        let err = client(&server)
+            .await
+            .tag_asset("tag-1", "a1")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ImmichError::Permanent(_)), "{err}");
+        assert!(err.to_string().contains("not_found"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn tag_asset_with_an_empty_body_is_permanent() {
+        let server = MockServer::start().await;
+        Mock::given(method("PUT"))
+            .and(path("/api/tags/tag-1/assets"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!([])))
+            .mount(&server)
+            .await;
+
+        let err = client(&server)
+            .await
+            .tag_asset("tag-1", "a1")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ImmichError::Permanent(_)), "{err}");
+    }
+
+    #[tokio::test]
+    async fn tag_asset_maps_a_server_error_to_transient() {
+        let server = MockServer::start().await;
+        Mock::given(method("PUT"))
+            .and(path("/api/tags/tag-1/assets"))
+            .respond_with(ResponseTemplate::new(503))
+            .mount(&server)
+            .await;
+
+        let err = client(&server)
+            .await
+            .tag_asset("tag-1", "a1")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ImmichError::Transient(_)), "{err}");
     }
 }
