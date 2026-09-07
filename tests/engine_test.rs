@@ -1425,3 +1425,70 @@ async fn restart_start_is_live_when_previous_run_finished_on_saturated_events() 
 
     handle.shutdown(Duration::from_secs(1)).await;
 }
+
+#[tokio::test]
+async fn the_completion_request_carries_the_person_name() {
+    let immich = MockServer::start().await;
+    let llm = MockServer::start().await;
+    // Same fixture shape as `src/immich.rs`'s asset-context tests: a named,
+    // non-hidden person plus a city.
+    Mock::given(method("POST"))
+        .and(path("/api/search/metadata"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "assets": {
+                "items": [{
+                    "id": "a1",
+                    "originalFileName": "IMG_1.HEIC",
+                    "people": [
+                        { "name": "Ana", "isHidden": false }
+                    ],
+                    "exifInfo": {
+                        "description": null,
+                        "city": "Sintra"
+                    }
+                }],
+                "nextPage": null
+            }
+        })))
+        .mount(&immich)
+        .await;
+    Mock::given(method("GET"))
+        .and(path_regex(r"^/api/assets/[^/]+/thumbnail$"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(JPEG.to_vec()))
+        .mount(&immich)
+        .await;
+    Mock::given(method("PUT"))
+        .and(path("/api/assets/a1"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&immich)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .and(body_string_contains("People: Ana"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "choices": [{ "message": { "content": "Ana on a dock." } }]
+        })))
+        .expect(1)
+        .mount(&llm)
+        .await;
+
+    let (tx, mut rx) = mpsc::channel(256);
+    let handle = engine::spawn_with(config(&immich, &llm), tx, fast()).unwrap();
+    handle.send(Command::Start).await;
+    let events = tokio::time::timeout(
+        Duration::from_secs(2),
+        collect_until(&mut rx, |e| matches!(e, Event::RunFinished { .. })),
+    )
+    .await
+    .expect("run did not finish: the completion mock likely did not match");
+
+    assert!(matches!(
+        events.last().unwrap(),
+        Event::RunFinished {
+            done: 1,
+            failed: 0,
+            ..
+        }
+    ));
+    handle.shutdown(Duration::from_secs(1)).await;
+}

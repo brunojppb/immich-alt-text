@@ -13,6 +13,7 @@ use crate::config::Config;
 use crate::events::{Command, Event, Stage};
 use crate::immich::{Asset, ImmichClient, ImmichError};
 use crate::llm::{LlmClient, LlmError};
+use crate::prompt;
 
 /// Knobs that tests change. Production uses `Default`.
 #[derive(Debug, Clone)]
@@ -555,10 +556,13 @@ impl Engine {
             return Outcome::Cancelled;
         }
         let llm_started = Instant::now();
+        let full_prompt = prompt::build(
+            &self.config.llm.prompt,
+            &asset.context,
+            &self.config.llm.context,
+        );
         let text = self
-            .retry(token, true, || {
-                self.llm.describe(&jpeg, &self.config.llm.prompt)
-            })
+            .retry(token, true, || self.llm.describe(&jpeg, &full_prompt))
             .await;
         let text = match text {
             Ok(text) => text,
