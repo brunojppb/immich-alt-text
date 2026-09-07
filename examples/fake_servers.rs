@@ -72,6 +72,22 @@ async fn main() {
         .mount(&immich)
         .await;
 
+    Mock::given(method("PUT"))
+        .and(path("/api/tags"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+            { "id": "tag-demo", "value": "gen-desc", "name": "gen-desc" }
+        ])))
+        .mount(&immich)
+        .await;
+    // One tag call fails so the failed counter shows a tag error too.
+    Mock::given(method("PUT"))
+        .and(path("/api/tags/tag-demo/assets"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!([{ "id": "a", "success": true }])),
+        )
+        .mount(&immich)
+        .await;
+
     Mock::given(method("GET"))
         .and(path("/v1/models"))
         .respond_with(
@@ -94,7 +110,7 @@ async fn main() {
         .await;
 
     let config = format!(
-        "[immich]\nurl = \"{}\"\napi_key = \"demo\"\ntimeout_secs = 5\n\n\
+        "[immich]\nurl = \"{}\"\napi_key = \"demo\"\ntimeout_secs = 5\ntag = \"gen-desc\"\n\n\
          [llm]\nbase_url = \"{}/v1\"\nmodel = \"demo-vision\"\ntimeout_secs = 10\n\n\
          [run]\nworkers = 2\nretries = 1\n",
         immich.uri(),
