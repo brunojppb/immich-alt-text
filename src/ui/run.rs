@@ -90,6 +90,9 @@ fn header_right(app: &App, theme: &Theme) -> Line<'static> {
     if app.is_dry_run() {
         spans.push(Span::styled(" DRY RUN ", theme.warn));
     }
+    if app.is_overwrite() {
+        spans.push(Span::styled(" OVERWRITE ", theme.warn));
+    }
     spans.push(Span::styled(format!(" {label} "), theme.state_style(label)));
     if let RunState::Error(msg) = &app.run_state {
         spans.insert(

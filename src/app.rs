@@ -3,7 +3,7 @@
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
-use crate::config::Config;
+use crate::config::{Config, Overrides};
 use crate::events::{Action, Command, Event, Key, Stage};
 use crate::settings::{is_context_row, SettingsForm, DRY_RUN, THEME};
 
@@ -71,12 +71,12 @@ pub struct App {
     pub settings: SettingsForm,
     pub footer_message: Option<String>,
     pub should_quit: bool,
-    dry_run_override: bool,
+    overrides: Overrides,
     connection_test_id: u64,
 }
 
 impl App {
-    pub fn new(config: Config, first_run: bool, dry_run_override: bool) -> Self {
+    pub fn new(config: Config, first_run: bool, overrides: Overrides) -> Self {
         let settings = SettingsForm::from_config(&config);
         Self {
             config,
@@ -102,13 +102,18 @@ impl App {
             settings,
             footer_message: None,
             should_quit: false,
-            dry_run_override,
+            overrides,
             connection_test_id: 0,
         }
     }
 
     pub fn is_dry_run(&self) -> bool {
-        self.config.run.dry_run || self.dry_run_override
+        self.config.run.dry_run || self.overrides.dry_run
+    }
+
+    /// True when this run describes assets that already have a description.
+    pub fn is_overwrite(&self) -> bool {
+        self.config.run.overwrite || self.overrides.overwrite
     }
 
     pub fn on_event(&mut self, event: Event) {
@@ -518,7 +523,7 @@ fn timestamp() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{Config, ThemeName};
+    use crate::config::{Config, Overrides, ThemeName};
     use crate::events::{Action, Command, Event, Key, Stage};
 
     fn config() -> Config {
@@ -530,7 +535,7 @@ mod tests {
     }
 
     fn app() -> App {
-        App::new(config(), false, false)
+        App::new(config(), false, Overrides::default())
     }
 
     fn done(name: &str) -> Event {
@@ -545,7 +550,10 @@ mod tests {
 
     #[test]
     fn first_run_opens_settings() {
-        assert_eq!(App::new(config(), true, false).screen, Screen::Settings);
+        assert_eq!(
+            App::new(config(), true, Overrides::default()).screen,
+            Screen::Settings
+        );
         assert_eq!(app().screen, Screen::Run);
     }
 
@@ -684,9 +692,31 @@ mod tests {
 
     #[test]
     fn cli_dry_run_override_is_visible_without_changing_saved_config() {
-        let a = App::new(config(), false, true);
+        let a = App::new(
+            config(),
+            false,
+            Overrides {
+                dry_run: true,
+                overwrite: false,
+            },
+        );
         assert!(a.is_dry_run());
         assert!(!a.config.run.dry_run);
+    }
+
+    #[test]
+    fn cli_overwrite_override_is_visible_without_changing_saved_config() {
+        let a = App::new(
+            config(),
+            false,
+            Overrides {
+                dry_run: false,
+                overwrite: true,
+            },
+        );
+        assert!(a.is_overwrite());
+        assert!(!a.config.run.overwrite);
+        assert!(!a.is_dry_run());
     }
 
     #[test]

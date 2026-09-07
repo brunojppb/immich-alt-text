@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use anyhow::Context;
 use clap::Parser;
 use immich_alt_text::app::{App, RunState};
-use immich_alt_text::config::{self, Config, ConfigError};
+use immich_alt_text::config::{self, Config, ConfigError, Overrides};
 use immich_alt_text::engine::{self, EngineHandle, PreparedEngine};
 use immich_alt_text::events::{Action, Event, Key};
 use immich_alt_text::immich::ImmichClient;
@@ -32,6 +32,9 @@ struct Cli {
     /// Describe assets without updating Immich.
     #[arg(long)]
     dry_run: bool,
+    /// Describe assets that already have a description.
+    #[arg(long)]
+    overwrite: bool,
 }
 
 #[tokio::main]
@@ -40,7 +43,17 @@ async fn main() -> anyhow::Result<()> {
     let _log_guard = init_logging()?;
     let path = cli.config.unwrap_or_else(config::default_path);
     let startup = load_startup_config(&path)?;
-    tracing::info!(config = %path.display(), needs_setup = startup.needs_setup, dry_run = cli.dry_run, "starting");
+    let overrides = Overrides {
+        dry_run: cli.dry_run,
+        overwrite: cli.overwrite,
+    };
+    tracing::info!(
+        config = %path.display(),
+        needs_setup = startup.needs_setup,
+        dry_run = overrides.dry_run,
+        overwrite = overrides.overwrite,
+        "starting"
+    );
 
     install_panic_hook();
     let terminal = ratatui::init();
@@ -50,7 +63,7 @@ async fn main() -> anyhow::Result<()> {
         startup.needs_setup,
         startup.message,
         path,
-        cli.dry_run,
+        overrides,
     )
     .await;
     ratatui::restore();
@@ -197,9 +210,10 @@ fn spawn_runtime(config: Config) -> Result<EngineRuntime, engine::EngineError> {
     Ok(prepare_runtime(config)?.start())
 }
 
-fn effective_config(config: &Config, dry_run_override: bool) -> Config {
+fn effective_config(config: &Config, overrides: Overrides) -> Config {
     let mut effective = config.clone();
-    effective.run.dry_run |= dry_run_override;
+    effective.run.dry_run |= overrides.dry_run;
+    effective.run.overwrite |= overrides.overwrite;
     effective
 }
 
@@ -227,17 +241,17 @@ async fn run(
     needs_setup: bool,
     setup_message: Option<String>,
     path: PathBuf,
-    dry_run_override: bool,
+    overrides: Overrides,
 ) -> anyhow::Result<()> {
     let (connection_tx, mut connection_rx) = mpsc::channel::<Event>(16);
     let mut keys = spawn_key_reader();
     let mut theme = Theme::from_name(cfg.ui.theme);
-    let mut app = App::new(cfg.clone(), needs_setup, dry_run_override);
+    let mut app = App::new(cfg.clone(), needs_setup, overrides);
     app.settings.message = setup_message;
     let mut engine: Option<EngineRuntime> = if needs_setup {
         None
     } else {
-        Some(spawn_runtime(effective_config(&cfg, dry_run_override))?)
+        Some(spawn_runtime(effective_config(&cfg, overrides))?)
     };
     let mut tick = tokio::time::interval(Duration::from_millis(250));
     let mut connection_test: Option<tokio::task::JoinHandle<()>> = None;
@@ -288,7 +302,7 @@ async fn run(
                         &mut theme,
                         &path,
                         new_cfg,
-                        dry_run_override,
+                        overrides,
                     )
                     .await;
                 }
@@ -314,10 +328,10 @@ async fn apply_saved_config(
     theme: &mut Theme,
     path: &Path,
     candidate: Config,
-    dry_run_override: bool,
+    overrides: Overrides,
 ) {
     apply_saved_config_with(app, active, theme, path, candidate, |config| {
-        prepare_runtime(effective_config(&config, dry_run_override)).map_err(|_| ())
+        prepare_runtime(effective_config(&config, overrides)).map_err(|_| ())
     })
     .await;
 }
@@ -409,7 +423,7 @@ mod tests {
     use clap::Parser;
     use immich_alt_text::app::{App, RunState, Screen};
     use immich_alt_text::config::{
-        Config, ContextConfig, ImmichConfig, LlmConfig, RunConfig, ThemeName, UiConfig,
+        Config, ContextConfig, ImmichConfig, LlmConfig, Overrides, RunConfig, ThemeName, UiConfig,
     };
     use immich_alt_text::engine;
     use immich_alt_text::events::{Action, Event, Key};
@@ -430,12 +444,28 @@ mod tests {
     }
 
     #[test]
-    fn cli_dry_run_overrides_runtime_without_mutating_saved_config() {
+    fn parses_the_overwrite_flag() {
+        let cli = Cli::try_parse_from(["immich-alt-text", "--overwrite"]).unwrap();
+        assert!(cli.overwrite);
+        let cli = Cli::try_parse_from(["immich-alt-text"]).unwrap();
+        assert!(!cli.overwrite);
+    }
+
+    #[test]
+    fn cli_overrides_reach_the_runtime_without_mutating_the_saved_config() {
         let saved = config();
-        let runtime = super::effective_config(&saved, true);
+        let runtime = super::effective_config(
+            &saved,
+            Overrides {
+                dry_run: true,
+                overwrite: true,
+            },
+        );
 
         assert!(runtime.run.dry_run);
+        assert!(runtime.run.overwrite);
         assert!(!saved.run.dry_run);
+        assert!(!saved.run.overwrite);
     }
 
     fn config() -> Config {
@@ -512,7 +542,7 @@ mod tests {
 
     #[test]
     fn closed_key_channel_stops_the_loop() {
-        let mut app = App::new(config(), false, false);
+        let mut app = App::new(config(), false, Overrides::default());
 
         assert!(matches!(handle_key_read(&mut app, None), KeyRead::Closed));
         assert!(matches!(
@@ -553,7 +583,7 @@ mod tests {
             handle: old_engine,
             events,
         });
-        let mut app = App::new(committed.clone(), false, false);
+        let mut app = App::new(committed.clone(), false, Overrides::default());
         app.run_state = RunState::Paused;
         app.scanned = 9;
         app.on_key(Key::Char('c'));
@@ -600,7 +630,7 @@ mod tests {
             handle: old_engine,
             events,
         });
-        let mut app = App::new(committed.clone(), false, false);
+        let mut app = App::new(committed.clone(), false, Overrides::default());
         app.run_state = RunState::Paused;
         app.done = 4;
         app.on_key(Key::Char('c'));
@@ -613,7 +643,7 @@ mod tests {
             &mut theme,
             dir.path(),
             candidate,
-            false,
+            Overrides::default(),
         )
         .await;
 
@@ -663,7 +693,7 @@ mod tests {
                 .expect("valid replacement"),
             events: new_events,
         };
-        let mut app = App::new(committed, false, false);
+        let mut app = App::new(committed, false, Overrides::default());
         let mut theme = Theme::btop();
         apply_saved_config_with(
             &mut app,

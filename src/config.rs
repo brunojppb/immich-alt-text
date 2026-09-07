@@ -26,6 +26,13 @@ pub struct Config {
     pub ui: UiConfig,
 }
 
+/// CLI flags that change the current run and not the saved config.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Overrides {
+    pub dry_run: bool,
+    pub overwrite: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ImmichConfig {
