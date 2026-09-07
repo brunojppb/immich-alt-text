@@ -144,7 +144,7 @@ impl ImmichClient {
             .into_iter()
             .map(|asset| {
                 let place = place_parts(asset.exif_info.as_ref());
-                let people = people_names(asset.people);
+                let people = people_names(asset.people.unwrap_or_default());
                 let taken = taken_at(asset.local_date_time.as_deref());
                 Asset {
                     id: asset.id,
@@ -215,8 +215,7 @@ struct AssetDto {
     id: String,
     original_file_name: String,
     exif_info: Option<ExifDto>,
-    #[serde(default)]
-    people: Vec<PersonDto>,
+    people: Option<Vec<PersonDto>>,
     local_date_time: Option<String>,
 }
 
@@ -224,8 +223,7 @@ struct AssetDto {
 #[serde(rename_all = "camelCase")]
 struct PersonDto {
     name: Option<String>,
-    #[serde(default)]
-    is_hidden: bool,
+    is_hidden: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -240,7 +238,7 @@ struct ExifDto {
 fn people_names(people: Vec<PersonDto>) -> Vec<String> {
     people
         .into_iter()
-        .filter(|person| !person.is_hidden)
+        .filter(|person| !person.is_hidden.unwrap_or(false))
         .filter_map(|person| {
             let name = person.name.unwrap_or_default().trim().to_string();
             (!name.is_empty()).then_some(name)
@@ -258,7 +256,11 @@ fn place_parts(exif: Option<&ExifDto>) -> Vec<String> {
         let Some(value) = value.as_deref().map(str::trim) else {
             continue;
         };
-        if value.is_empty() || parts.last().is_some_and(|last: &String| last == value) {
+        if value.is_empty()
+            || parts
+                .last()
+                .is_some_and(|last: &String| last.eq_ignore_ascii_case(value))
+        {
             continue;
         }
         parts.push(value.to_string());
@@ -266,9 +268,11 @@ fn place_parts(exif: Option<&ExifDto>) -> Vec<String> {
     parts
 }
 
-/// Immich sends an ISO timestamp. The offset is part of the wall-clock value, so keep it as written.
+/// Parses Immich's local date-time string into a naive date and time.
 fn taken_at(raw: Option<&str>) -> Option<chrono::NaiveDateTime> {
     let raw = raw?;
+    // The offset is part of the wall-clock value Immich sends, so drop it
+    // instead of converting to UTC.
     if let Ok(parsed) = chrono::DateTime::parse_from_rfc3339(raw) {
         return Some(parsed.naive_local());
     }
@@ -657,15 +661,62 @@ mod tests {
         assert_eq!(page.items[0].context, AssetContext::default());
     }
 
+    #[tokio::test]
+    async fn an_explicit_null_people_list_is_an_empty_context() {
+        let server = MockServer::start().await;
+        let items = serde_json::json!({
+            "assets": {
+                "items": [{ "id": "a1", "originalFileName": "IMG_1.jpg", "people": null }],
+                "nextPage": null
+            }
+        });
+        Mock::given(method("POST"))
+            .and(path("/api/search/metadata"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(items))
+            .mount(&server)
+            .await;
+
+        let client = ImmichClient::new(&server.uri(), "key", Duration::from_secs(5)).unwrap();
+        let page = client.list_images(1, 10).await.unwrap();
+        assert_eq!(page.items[0].context, AssetContext::default());
+    }
+
+    #[tokio::test]
+    async fn an_explicit_null_is_hidden_keeps_the_person() {
+        let server = MockServer::start().await;
+        let items = serde_json::json!({
+            "assets": {
+                "items": [{
+                    "id": "a1",
+                    "originalFileName": "IMG_1.jpg",
+                    "people": [{ "name": "Ana", "isHidden": null }]
+                }],
+                "nextPage": null
+            }
+        });
+        Mock::given(method("POST"))
+            .and(path("/api/search/metadata"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(items))
+            .mount(&server)
+            .await;
+
+        let client = ImmichClient::new(&server.uri(), "key", Duration::from_secs(5)).unwrap();
+        let page = client.list_images(1, 10).await.unwrap();
+        assert_eq!(page.items[0].context.people, vec!["Ana".to_string()]);
+    }
+
     #[test]
     fn seven_people_produce_six_names() {
         let people: Vec<PersonDto> = (0..7)
             .map(|i| PersonDto {
                 name: Some(format!("P{i}")),
-                is_hidden: false,
+                is_hidden: Some(false),
             })
             .collect();
-        assert_eq!(people_names(people).len(), 6);
+        assert_eq!(
+            people_names(people),
+            vec!["P0", "P1", "P2", "P3", "P4", "P5"]
+        );
     }
 
     #[test]
@@ -680,6 +731,17 @@ mod tests {
             place_parts(Some(&exif)),
             vec!["Lisbon".to_string(), "Portugal".to_string()]
         );
+    }
+
+    #[test]
+    fn a_repeated_place_part_with_different_case_appears_once() {
+        let exif = ExifDto {
+            description: None,
+            city: Some("Lisbon".into()),
+            state: None,
+            country: Some("lisbon".into()),
+        };
+        assert_eq!(place_parts(Some(&exif)), vec!["Lisbon".to_string()]);
     }
 
     #[test]
