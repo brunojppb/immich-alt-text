@@ -473,7 +473,8 @@ impl Engine {
             .await;
     }
 
-    // One argument per piece of shared run state; a struct would only move the count around.
+    // Clippy's threshold, not a design problem: these are the run-scoped
+    // values each worker clones.
     #[allow(clippy::too_many_arguments)]
     async fn worker(
         self: Arc<Self>,
@@ -707,10 +708,7 @@ impl Engine {
     }
 
     /// The tag id for this run. `None` when the run adds no tag.
-    async fn resolve_tag(
-        &self,
-        token: &CancellationToken,
-    ) -> Result<Option<String>, StageError> {
+    async fn resolve_tag(&self, token: &CancellationToken) -> Result<Option<String>, StageError> {
         if self.config.run.dry_run {
             return Ok(None);
         }

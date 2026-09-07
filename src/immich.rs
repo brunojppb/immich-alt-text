@@ -841,7 +841,11 @@ mod tests {
             .mount(&server)
             .await;
 
-        let id = client(&server).await.upsert_tag("ai/alt-text").await.unwrap();
+        let id = client(&server)
+            .await
+            .upsert_tag("ai/alt-text")
+            .await
+            .unwrap();
         assert_eq!(id, "tag-child");
     }
 
@@ -854,7 +858,11 @@ mod tests {
             .mount(&server)
             .await;
 
-        let err = client(&server).await.upsert_tag("gen-desc").await.unwrap_err();
+        let err = client(&server)
+            .await
+            .upsert_tag("gen-desc")
+            .await
+            .unwrap_err();
         assert!(matches!(err, ImmichError::Permanent(_)), "{err}");
         assert!(err.to_string().contains("gen-desc"), "{err}");
     }
@@ -868,7 +876,11 @@ mod tests {
             .mount(&server)
             .await;
 
-        let err = client(&server).await.upsert_tag("gen-desc").await.unwrap_err();
+        let err = client(&server)
+            .await
+            .upsert_tag("gen-desc")
+            .await
+            .unwrap_err();
         assert!(matches!(err, ImmichError::Fatal(_)), "{err}");
     }
 
@@ -886,7 +898,11 @@ mod tests {
             .mount(&server)
             .await;
 
-        client(&server).await.tag_asset("tag-1", "a1").await.unwrap();
+        client(&server)
+            .await
+            .tag_asset("tag-1", "a1")
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
@@ -900,7 +916,11 @@ mod tests {
             .mount(&server)
             .await;
 
-        client(&server).await.tag_asset("tag-1", "a1").await.unwrap();
+        client(&server)
+            .await
+            .tag_asset("tag-1", "a1")
+            .await
+            .unwrap();
     }
 
     #[tokio::test]

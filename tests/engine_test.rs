@@ -514,8 +514,7 @@ async fn tags_each_asset_after_the_description_write() {
         .and(path("/api/tags/tag-1/assets"))
         .and(body_json(json!({ "ids": ["a1"] })))
         .respond_with(
-            ResponseTemplate::new(200)
-                .set_body_json(json!([{ "id": "a1", "success": true }])),
+            ResponseTemplate::new(200).set_body_json(json!([{ "id": "a1", "success": true }])),
         )
         .expect(1)
         .mount(&immich)
@@ -544,7 +543,14 @@ async fn tags_each_asset_after_the_description_write() {
         .collect();
     assert_eq!(
         stages,
-        vec!["started", "fetching", "calling llm", "writing", "tagging", "done"]
+        vec![
+            "started",
+            "fetching",
+            "calling llm",
+            "writing",
+            "tagging",
+            "done"
+        ]
     );
     handle.shutdown(Duration::from_secs(1)).await;
 }
@@ -665,10 +671,11 @@ async fn a_failing_tag_upsert_stops_the_run_before_any_asset_starts() {
     let llm = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/api/search/metadata"))
-        .respond_with(
-            ResponseTemplate::new(200)
-                .set_body_json(search_page(&[("a1", "IMG_1.HEIC", None)])),
-        )
+        .respond_with(ResponseTemplate::new(200).set_body_json(search_page(&[(
+            "a1",
+            "IMG_1.HEIC",
+            None,
+        )])))
         .mount(&immich)
         .await;
     Mock::given(method("GET"))
