@@ -10,6 +10,7 @@ pub enum Stage {
     Fetching,
     CallingLlm,
     Writing,
+    Tagging,
 }
 
 impl Stage {
@@ -19,6 +20,7 @@ impl Stage {
             Stage::Fetching => "fetching",
             Stage::CallingLlm => "calling llm",
             Stage::Writing => "writing",
+            Stage::Tagging => "tagging",
         }
     }
 }

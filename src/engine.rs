@@ -327,6 +327,21 @@ impl Engine {
         active: Arc<AtomicBool>,
     ) {
         let started = Instant::now();
+        // One failure here beats one failure for each asset, so the run stops
+        // before the workers start.
+        let tag_id = match self.resolve_tag(&token).await {
+            Ok(tag_id) => tag_id,
+            Err(StageError::Cancelled) => {
+                active.store(false, Ordering::Release);
+                return;
+            }
+            Err(error) => {
+                self.fail_run(&token, &terminal_cancel, error.to_string())
+                    .await;
+                active.store(false, Ordering::Release);
+                return;
+            }
+        };
         let workers = self.config.run.workers.max(1);
         let (asset_tx, asset_rx) = mpsc::channel::<Asset>(workers.saturating_mul(4));
         let asset_rx = Arc::new(Mutex::new(asset_rx));
@@ -342,6 +357,7 @@ impl Engine {
                 asset_rx.clone(),
                 done.clone(),
                 failed.clone(),
+                tag_id.clone(),
             ));
         }
 
@@ -387,7 +403,8 @@ impl Engine {
         }
     }
 
-    /// Pages through Immich and queues assets that need a description.
+    /// Pages through Immich and queues assets for this run: those needing a
+    /// description, or every asset when overwrite mode is on.
     /// Dropping `asset_tx` at the end tells the workers to stop.
     async fn discover(
         self: Arc<Self>,
@@ -456,6 +473,8 @@ impl Engine {
             .await;
     }
 
+    // One argument per piece of shared run state; a struct would only move the count around.
+    #[allow(clippy::too_many_arguments)]
     async fn worker(
         self: Arc<Self>,
         token: CancellationToken,
@@ -464,6 +483,7 @@ impl Engine {
         asset_rx: Arc<Mutex<mpsc::Receiver<Asset>>>,
         done: Arc<AtomicU64>,
         failed: Arc<AtomicU64>,
+        tag_id: Option<String>,
     ) {
         let mut pending = None;
 
@@ -515,7 +535,10 @@ impl Engine {
                 drop(handoff_guard);
             }
 
-            match self.process(&token, &terminal_cancel, &asset).await {
+            match self
+                .process(&token, &terminal_cancel, &asset, tag_id.as_deref())
+                .await
+            {
                 Outcome::Done => {
                     done.fetch_add(1, Ordering::Relaxed);
                 }
@@ -532,6 +555,7 @@ impl Engine {
         token: &CancellationToken,
         terminal_cancel: &CancellationToken,
         asset: &Asset,
+        tag_id: Option<&str>,
     ) -> Outcome {
         if token.is_cancelled() {
             return Outcome::Cancelled;
@@ -589,6 +613,22 @@ impl Engine {
                 return self
                     .fail_asset(token, terminal_cancel, id, name, error)
                     .await;
+            }
+
+            if let Some(tag_id) = tag_id {
+                if !self.stage(token, &id, Stage::Tagging).await {
+                    return Outcome::Cancelled;
+                }
+                // Like the description write: once the tool starts changing an
+                // asset, it waits for the answer.
+                if let Err(error) = self
+                    .retry(token, false, || self.immich.tag_asset(tag_id, &id))
+                    .await
+                {
+                    return self
+                        .fail_asset(token, terminal_cancel, id, name, error)
+                        .await;
+                }
             }
         }
 
@@ -664,6 +704,22 @@ impl Engine {
                 Err(error) => return Err(error),
             }
         }
+    }
+
+    /// The tag id for this run. `None` when the run adds no tag.
+    async fn resolve_tag(
+        &self,
+        token: &CancellationToken,
+    ) -> Result<Option<String>, StageError> {
+        if self.config.run.dry_run {
+            return Ok(None);
+        }
+        let Some(tag) = self.config.immich.active_tag() else {
+            return Ok(None);
+        };
+        self.retry(token, true, || self.immich.upsert_tag(tag))
+            .await
+            .map(Some)
     }
 
     async fn fail_asset(
@@ -878,6 +934,7 @@ mod tests {
             Arc::new(Mutex::new(asset_rx)),
             Arc::new(AtomicU64::new(0)),
             Arc::new(AtomicU64::new(0)),
+            None,
         ));
         while asset_tx.capacity() == 0 {
             tokio::task::yield_now().await;

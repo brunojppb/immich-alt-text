@@ -485,6 +485,221 @@ async fn emits_stages_in_order_for_one_asset() {
     handle.shutdown(Duration::from_secs(1)).await;
 }
 
+/// Answers the tag upsert once with the given id.
+async fn mount_tag_upsert(immich: &MockServer, value: &str, id: &str) {
+    Mock::given(method("PUT"))
+        .and(path("/api/tags"))
+        .and(body_json(json!({ "tags": [value] })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+            { "id": id, "value": value, "name": value }
+        ])))
+        .expect(1)
+        .mount(immich)
+        .await;
+}
+
+#[tokio::test]
+async fn tags_each_asset_after_the_description_write() {
+    let immich = MockServer::start().await;
+    let llm = MockServer::start().await;
+    mount_immich_basics(&immich, &[("a1", "IMG_1.HEIC", None)]).await;
+    mount_tag_upsert(&immich, "gen-desc", "tag-1").await;
+    Mock::given(method("PUT"))
+        .and(path("/api/assets/a1"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+        .expect(1)
+        .mount(&immich)
+        .await;
+    Mock::given(method("PUT"))
+        .and(path("/api/tags/tag-1/assets"))
+        .and(body_json(json!({ "ids": ["a1"] })))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!([{ "id": "a1", "success": true }])),
+        )
+        .expect(1)
+        .mount(&immich)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(completion("x")))
+        .mount(&llm)
+        .await;
+
+    let mut cfg = config(&immich, &llm);
+    cfg.immich.tag = "gen-desc".into();
+    let (tx, mut rx) = mpsc::channel(256);
+    let handle = engine::spawn_with(cfg, tx, fast()).unwrap();
+    handle.send(Command::Start).await;
+    let events = collect_until(&mut rx, |e| matches!(e, Event::RunFinished { .. })).await;
+
+    let stages: Vec<String> = events
+        .iter()
+        .filter_map(|e| match e {
+            Event::AssetStarted { .. } => Some("started".to_string()),
+            Event::AssetStage { stage, .. } => Some(stage.label().to_string()),
+            Event::AssetDone { .. } => Some("done".to_string()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        stages,
+        vec!["started", "fetching", "calling llm", "writing", "tagging", "done"]
+    );
+    handle.shutdown(Duration::from_secs(1)).await;
+}
+
+#[tokio::test]
+async fn an_empty_tag_sends_no_tag_request() {
+    let immich = MockServer::start().await;
+    let llm = MockServer::start().await;
+    mount_immich_basics(&immich, &[("a1", "IMG_1.HEIC", None)]).await;
+    Mock::given(method("PUT"))
+        .and(path_regex(r"^/api/tags"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([])))
+        .expect(0)
+        .mount(&immich)
+        .await;
+    Mock::given(method("PUT"))
+        .and(path("/api/assets/a1"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+        .mount(&immich)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(completion("x")))
+        .mount(&llm)
+        .await;
+
+    let (tx, mut rx) = mpsc::channel(256);
+    let handle = engine::spawn_with(config(&immich, &llm), tx, fast()).unwrap();
+    handle.send(Command::Start).await;
+    collect_until(&mut rx, |e| matches!(e, Event::RunFinished { .. })).await;
+    handle.shutdown(Duration::from_secs(1)).await;
+}
+
+#[tokio::test]
+async fn dry_run_sends_no_description_write_and_no_tag_request() {
+    let immich = MockServer::start().await;
+    let llm = MockServer::start().await;
+    mount_immich_basics(&immich, &[("a1", "IMG_1.HEIC", None)]).await;
+    Mock::given(method("PUT"))
+        .and(path_regex(r"^/api/tags"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([])))
+        .expect(0)
+        .mount(&immich)
+        .await;
+    Mock::given(method("PUT"))
+        .and(path("/api/assets/a1"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(0)
+        .mount(&immich)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(completion("x")))
+        .expect(1)
+        .mount(&llm)
+        .await;
+
+    let mut cfg = config(&immich, &llm);
+    cfg.run.dry_run = true;
+    cfg.immich.tag = "gen-desc".into();
+    let (tx, mut rx) = mpsc::channel(256);
+    let handle = engine::spawn_with(cfg, tx, fast()).unwrap();
+    handle.send(Command::Start).await;
+    let events = collect_until(&mut rx, |e| matches!(e, Event::RunFinished { .. })).await;
+
+    assert!(events
+        .iter()
+        .any(|e| matches!(e, Event::AssetDone { description, .. } if description == "x")));
+    handle.shutdown(Duration::from_secs(1)).await;
+}
+
+#[tokio::test]
+async fn a_failing_tag_call_marks_the_asset_failed() {
+    let immich = MockServer::start().await;
+    let llm = MockServer::start().await;
+    mount_immich_basics(&immich, &[("a1", "IMG_1.HEIC", None)]).await;
+    mount_tag_upsert(&immich, "gen-desc", "tag-1").await;
+    Mock::given(method("PUT"))
+        .and(path("/api/assets/a1"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+        .expect(1)
+        .mount(&immich)
+        .await;
+    Mock::given(method("PUT"))
+        .and(path("/api/tags/tag-1/assets"))
+        .respond_with(ResponseTemplate::new(500))
+        .mount(&immich)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(completion("x")))
+        .mount(&llm)
+        .await;
+
+    let mut cfg = config_with_run(&immich, &llm, 1, 1, 10);
+    cfg.immich.tag = "gen-desc".into();
+    let (tx, mut rx) = mpsc::channel(256);
+    let handle = engine::spawn_with(cfg, tx, fast()).unwrap();
+    handle.send(Command::Start).await;
+    let events = collect_until(&mut rx, |e| matches!(e, Event::RunFinished { .. })).await;
+
+    assert!(events
+        .iter()
+        .any(|e| matches!(e, Event::AssetFailed { name, .. } if name == "IMG_1.HEIC")));
+    match events.last().unwrap() {
+        Event::RunFinished { done, failed, .. } => {
+            assert_eq!(*done, 0);
+            assert_eq!(*failed, 1);
+        }
+        other => panic!("unexpected last event {other:?}"),
+    }
+    handle.shutdown(Duration::from_secs(1)).await;
+}
+
+#[tokio::test]
+async fn a_failing_tag_upsert_stops_the_run_before_any_asset_starts() {
+    let immich = MockServer::start().await;
+    let llm = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/search/metadata"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(search_page(&[("a1", "IMG_1.HEIC", None)])),
+        )
+        .mount(&immich)
+        .await;
+    Mock::given(method("GET"))
+        .and(path_regex(r"^/api/assets/[^/]+/thumbnail$"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(JPEG.to_vec()))
+        .expect(0)
+        .mount(&immich)
+        .await;
+    Mock::given(method("PUT"))
+        .and(path("/api/tags"))
+        .respond_with(ResponseTemplate::new(401))
+        .mount(&immich)
+        .await;
+
+    let mut cfg = config(&immich, &llm);
+    cfg.immich.tag = "gen-desc".into();
+    let (tx, mut rx) = mpsc::channel(256);
+    let handle = engine::spawn_with(cfg, tx, fast()).unwrap();
+    handle.send(Command::Start).await;
+    let events = collect_until(&mut rx, |e| matches!(e, Event::Fatal { .. })).await;
+
+    assert!(!events
+        .iter()
+        .any(|e| matches!(e, Event::AssetStarted { .. })));
+    assert!(matches!(
+        events.last().unwrap(),
+        Event::Fatal { error } if error.contains("API key")
+    ));
+    handle.shutdown(Duration::from_secs(1)).await;
+}
+
 #[tokio::test]
 async fn retries_transient_llm_errors_then_succeeds() {
     let immich = MockServer::start().await;
