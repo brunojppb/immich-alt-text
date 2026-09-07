@@ -3,6 +3,7 @@ source: tests/ui_snapshots.rs
 expression: terminal.backend()
 ---
 "                                                                                                    "
+"                                                                                                    "
 "           ╭ settings ──────────────────────────────────────────────────────────────────╮           "
 "           │▸ immich url         https://photos.home.lan▏                               │           "
 "           │  immich api key     secret-key                                 ctrl-r hide │           "
@@ -28,7 +29,6 @@ expression: terminal.backend()
 "           │                                                                            │           "
 "           │  ctrl-t test connections                                                   │           "
 "           │  invalid config: run.workers must be at least 1                            │           "
-"           │                                                                            │           "
 "           │ ctrl-s save    ctrl-t test    ← → select    ctrl-u clear    esc back       │           "
 "           ╰────────────────────────────────────────────────────────────────────────────╯           "
 "                                                                                                    "

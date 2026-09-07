@@ -232,6 +232,42 @@ fn settings_screen_tiny_keeps_the_focused_row_visible() {
     snapshot("settings_tiny_40x10", 40, 10, &app, now);
 }
 
+#[test]
+fn settings_screen_keeps_the_focused_row_visible_with_a_test_result() {
+    let now = Instant::now();
+    let mut app = App::new(config(), true, Overrides::default());
+    app.settings.focused = immich_alt_text::settings::IMMICH_URL;
+    app.settings.test_result = Some((Ok("v3.1.0".into()), Ok("200 OK".into())));
+    let rendered = render_to_string(80, 24, &app, now);
+    assert!(rendered.contains("immich url"), "{rendered}");
+    assert!(rendered.contains("ctrl-t test connections"), "{rendered}");
+}
+
+#[test]
+fn settings_screen_keeps_the_last_row_visible_with_a_test_result() {
+    let now = Instant::now();
+    let mut app = App::new(config(), true, Overrides::default());
+    app.settings.focused = immich_alt_text::settings::OVERWRITE;
+    app.settings.test_result = Some((Ok("v3.1.0".into()), Ok("200 OK".into())));
+    let rendered = render_to_string(80, 24, &app, now);
+    assert!(rendered.contains("overwrite"), "{rendered}");
+    assert!(rendered.contains("ctrl-t test connections"), "{rendered}");
+}
+
+#[test]
+fn settings_screen_shows_a_message_and_a_test_result_together() {
+    let now = Instant::now();
+    let mut app = App::new(config(), true, Overrides::default());
+    app.settings.test_result = Some((Ok("v3.1.0".into()), Err("HTTP 401".into())));
+    app.settings.message = Some("invalid config: run.workers must be at least 1".into());
+    let rendered = render_to_string(80, 24, &app, now);
+    assert!(
+        rendered.contains("run.workers must be at least 1"),
+        "{rendered}"
+    );
+    assert!(rendered.contains("ctrl-t test connections"), "{rendered}");
+}
+
 fn render_to_string(width: u16, height: u16, app: &App, now: Instant) -> String {
     let backend = TestBackend::new(width, height);
     let mut terminal = Terminal::new(backend).unwrap();
