@@ -307,7 +307,7 @@ Client construction errors are fatal. Request and response-shape errors are perm
 
 [`LlmClient`](src/llm.rs) treats the configured base URL as the API root. `ping` calls `GET /models`. `describe` calls `POST /chat/completions`.
 
-The request contains the prompt and a base64 JPEG data URL. It also contains the model and `max_tokens` values. The engine builds that prompt with [`prompt::build`](src/prompt.rs), so the context block travels with the image. `build` appends the block after the configured prompt, or replaces a `{{context}}` placeholder when the prompt holds one. A disabled switch, an empty value, and `enabled = false` each remove their part. Nothing remains when no part survives.
+The request contains the prompt and a base64 JPEG data URL. It also contains the model and `max_tokens` values. The engine builds that prompt with [`prompt::build`](src/prompt.rs), so the context block travels with the image. `build` appends the block after the configured prompt, or replaces a `{{context}}` placeholder when the prompt holds one. The block leads with its own instruction, so a prompt that never mentions the context still gets named people. A disabled switch, an empty value, and `enabled = false` each remove their part. Nothing remains when no part survives.
 
 The response parser reads only the first choice. It trims the text. Missing or blank text is a permanent error. The application does not edit the prompt, check the output length, moderate the text, or use a fallback model.
 
@@ -414,7 +414,7 @@ Text fields accept typing, backspace, and `ctrl-u`. The theme and dry-run rows a
 │  immich api key     ••••••••                         ctrl-r show     │
 │▸ prompt             Write alt text for this photo: one or two         │
 │                     plain sentences describing what is visible.      │
-│                     Name the people when they are clearly the▏       │
+│                     No preamble, no quotes.▏                         │
 │  llm timeout (s)    120                                              │
 │  context people     ( ) off   (●) on                                 │
 │  context place      ( ) off   (●) on                                 │

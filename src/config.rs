@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use serde::{Deserialize, Serialize};
 
 /// Prompt used when the config file does not set `llm.prompt`.
-pub const DEFAULT_PROMPT: &str = "Write alt text for this photo: one or two plain sentences describing what is visible. Name the people when they are clearly the subject. Use the context only where the image supports it. Do not list the context back. No preamble, no quotes, no \"This image shows\".";
+pub const DEFAULT_PROMPT: &str = "Write alt text for this photo: one or two plain sentences describing what is visible. No preamble, no quotes, no \"This image shows\".";
 pub const MAX_WORKERS: usize = 64;
 pub const MAX_RETRIES: u32 = 10;
 pub const MAX_PAGE_SIZE: u32 = 1000;
@@ -677,10 +677,5 @@ model = "m"
         assert!(loaded.llm.context.people);
         assert!(!loaded.llm.context.place);
         assert!(!loaded.llm.context.date);
-    }
-
-    #[test]
-    fn the_default_prompt_asks_for_names() {
-        assert!(DEFAULT_PROMPT.contains("Name the people"));
     }
 }

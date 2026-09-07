@@ -7,7 +7,9 @@ use crate::immich::AssetContext;
 
 /// Marks where the context block goes. A prompt without it gets the block appended.
 const PLACEHOLDER: &str = "{{context}}";
-const HEADER: &str = "Context from the photo library:";
+/// The block leads with its own instruction, so a user prompt that never mentions the
+/// context still gets named people.
+const HEADER: &str = "Context from the photo library. Use it only where the image supports it. Name the people when they are in the photo. Never list this context back:";
 
 /// The prompt for one photo, with the library context in place.
 pub fn build(prompt: &str, context: &AssetContext, cfg: &ContextConfig) -> String {
@@ -102,7 +104,9 @@ mod tests {
         let out = build("Describe it.", &context(), &ContextConfig::default());
         assert_eq!(
             out,
-            "Describe it.\n\nContext from the photo library:\nPeople: Ana, Marco\nPlace: Sintra, Portugal\nTaken: Friday 14 June 2019, evening"
+            format!(
+                "Describe it.\n\n{HEADER}\nPeople: Ana, Marco\nPlace: Sintra, Portugal\nTaken: Friday 14 June 2019, evening"
+            )
         );
     }
 
@@ -115,7 +119,9 @@ mod tests {
         );
         assert_eq!(
             out,
-            "Context from the photo library:\nPeople: Ana, Marco\nPlace: Sintra, Portugal\nTaken: Friday 14 June 2019, evening\n\nDescribe it."
+            format!(
+                "{HEADER}\nPeople: Ana, Marco\nPlace: Sintra, Portugal\nTaken: Friday 14 June 2019, evening\n\nDescribe it."
+            )
         );
         assert_eq!(out.matches("People:").count(), 1);
     }

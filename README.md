@@ -35,13 +35,15 @@ reads that data from the same search it already runs, then sends it to the model
 with the image:
 
 ```text
-Context from the photo library:
+Context from the photo library. Use it only where the image supports it. Name
+the people when they are in the photo. Never list this context back:
 People: Ana, Marco
 Place: Sintra, Lisbon, Portugal
 Taken: Friday 14 June 2019, evening
 ```
 
-The application appends the block after your prompt. To place it yourself,
+The block leads with its own instruction, so your prompt does not need to
+mention the context. The application appends the block after your prompt. To place it yourself,
 put `{{context}}` on its own line in the prompt. The block can run several
 lines. It replaces the whole placeholder line. Two placeholders each get
 their own copy of the block.
@@ -178,9 +180,7 @@ max_tokens = 200
 timeout_secs = 120
 prompt = """
 Write alt text for this photo: one or two plain sentences describing what is
-visible. Name the people when they are clearly the subject. Use the context
-only where the image supports it. Do not list the context back. No preamble,
-no quotes, no "This image shows".
+visible. No preamble, no quotes, no "This image shows".
 """
 
 [llm.context]
