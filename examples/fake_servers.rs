@@ -79,7 +79,6 @@ async fn main() {
         ])))
         .mount(&immich)
         .await;
-    // One tag call fails so the failed counter shows a tag error too.
     Mock::given(method("PUT"))
         .and(path("/api/tags/tag-demo/assets"))
         .respond_with(
