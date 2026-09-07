@@ -6,19 +6,20 @@ use crate::config::ContextConfig;
 use crate::immich::AssetContext;
 
 /// Marks where the context block goes. A prompt without it gets the block appended.
-pub const PLACEHOLDER: &str = "{{context}}";
+const PLACEHOLDER: &str = "{{context}}";
 const HEADER: &str = "Context from the photo library:";
 
 /// The prompt for one photo, with the library context in place.
 pub fn build(prompt: &str, context: &AssetContext, cfg: &ContextConfig) -> String {
     let block = block(context, cfg);
-    if prompt.contains(PLACEHOLDER) {
-        return place(prompt, &block);
-    }
-    if block.is_empty() {
-        return prompt.to_string();
-    }
-    format!("{}\n\n{block}", prompt.trim_end())
+    let built = if prompt.contains(PLACEHOLDER) {
+        place(prompt, &block)
+    } else if block.is_empty() {
+        prompt.to_string()
+    } else {
+        format!("{}\n\n{block}", prompt.trim_end())
+    };
+    built.trim().to_string()
 }
 
 fn block(context: &AssetContext, cfg: &ContextConfig) -> String {
@@ -127,6 +128,38 @@ mod tests {
             &ContextConfig::default(),
         );
         assert_eq!(out, "Describe it.\nBe brief.");
+    }
+
+    #[test]
+    fn an_empty_block_leaves_no_leading_blank_line() {
+        let out = build(
+            "{{context}}\n\nDescribe it.",
+            &AssetContext::default(),
+            &ContextConfig::default(),
+        );
+        assert_eq!(out, "Describe it.");
+    }
+
+    #[test]
+    fn a_trailing_newline_still_ends_with_the_last_context_line() {
+        let out = build("Describe it.\n", &context(), &ContextConfig::default());
+        assert!(out.ends_with("Taken: Friday 14 June 2019, evening"));
+    }
+
+    #[test]
+    fn a_single_digit_day_has_no_leading_zero() {
+        let context = AssetContext {
+            people: Vec::new(),
+            place: Vec::new(),
+            taken: Some(
+                NaiveDate::from_ymd_opt(2019, 6, 1)
+                    .unwrap()
+                    .and_hms_opt(9, 0, 0)
+                    .unwrap(),
+            ),
+        };
+        let out = build("Describe it.", &context, &ContextConfig::default());
+        assert!(out.contains("Taken: Saturday 1 June 2019, morning"));
     }
 
     #[test]

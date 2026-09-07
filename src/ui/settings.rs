@@ -21,7 +21,12 @@ pub fn render(frame: &mut Frame, app: &App, theme: &Theme) {
     let area = frame.area();
     let form = &app.settings;
     let width = area.width.saturating_sub(2).clamp(40, 78);
-    let height = (form.fields.len() as u16 + 12 + (PROMPT_HEIGHT as u16 - 1)).min(area.height);
+    // Rows beyond the fields: the context switches, theme, dry run, a blank
+    // line, the test-connections line, the message line, the box borders,
+    // and the footer row.
+    let fixed_rows = CONTEXT_LABELS.len() as u16 + 9;
+    let height =
+        (form.fields.len() as u16 + fixed_rows + (PROMPT_HEIGHT as u16 - 1)).min(area.height);
     let [v] = Layout::vertical([Constraint::Length(height)])
         .flex(Flex::Center)
         .areas(area);
@@ -145,10 +150,17 @@ pub fn render(frame: &mut Frame, app: &App, theme: &Theme) {
         Some(msg) => Line::from(Span::styled(format!("  {msg}"), theme.err)),
         None => Line::default(),
     });
+    // A message is the scroll anchor when there is one, so it is always in
+    // view even on a short terminal; otherwise the focused row anchors it.
+    let anchor_line = if form.message.is_some() {
+        lines.len() - 1
+    } else {
+        focused_line
+    };
     let content_height = inner.height.saturating_sub(1);
     let max_scroll = lines.len().saturating_sub(content_height as usize);
     let visible_focus_offset = content_height.saturating_sub(1) as usize;
-    let mut scroll = focused_line.saturating_sub(visible_focus_offset);
+    let mut scroll = anchor_line.saturating_sub(visible_focus_offset);
     scroll = scroll.min(max_scroll);
     let content = Rect {
         height: content_height,

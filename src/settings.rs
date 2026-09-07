@@ -29,6 +29,11 @@ pub const PROMPT_WRAP_WIDTH: usize = 43;
 /// Row labels for the context switches, in row order.
 pub const CONTEXT_LABELS: [&str; 3] = ["context people", "context place", "context date"];
 
+/// True when `index` is one of the context switch rows.
+pub fn is_context_row(index: usize) -> bool {
+    (CONTEXT_PEOPLE..=CONTEXT_DATE).contains(&index)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Field {
     pub label: &'static str,
@@ -183,7 +188,8 @@ impl SettingsForm {
             layout.row_starts[target_row] + layout.cursor_column.min(target_column);
     }
 
-    /// Clears the focused text field. Theme selection is intentionally not text-editable.
+    /// Clears the focused text field. The theme, dry run, and context switch rows are
+    /// intentionally not text-editable.
     pub fn clear(&mut self) {
         if self.focused == PROMPT {
             self.fields[PROMPT].value.clear();
@@ -240,9 +246,7 @@ impl SettingsForm {
 
     /// Row index inside `context`, when a context row has focus.
     fn context_index(&self) -> Option<usize> {
-        (CONTEXT_PEOPLE..=CONTEXT_DATE)
-            .contains(&self.focused)
-            .then(|| self.focused - CONTEXT_PEOPLE)
+        is_context_row(self.focused).then(|| self.focused - CONTEXT_PEOPLE)
     }
 
     pub fn select_context_next(&mut self) {
@@ -435,6 +439,16 @@ mod tests {
     }
 
     #[test]
+    fn focus_prev_reaches_every_context_row() {
+        let mut f = SettingsForm::from_config(&base());
+        f.focused = THEME;
+        for expected in [CONTEXT_DATE, CONTEXT_PLACE, CONTEXT_PEOPLE] {
+            f.focus_prev();
+            assert_eq!(f.focused, expected);
+        }
+    }
+
+    #[test]
     fn theme_selection_cycles_without_text_editing() {
         let mut f = SettingsForm::from_config(&base());
         f.focused = THEME;
@@ -596,6 +610,16 @@ mod tests {
         assert!(cfg.llm.context.people);
         assert!(!cfg.llm.context.place);
         assert!(!cfg.llm.context.date);
+    }
+
+    #[test]
+    fn to_config_keeps_context_enabled_as_a_file_only_value() {
+        let mut base = base();
+        base.llm.context.enabled = false;
+        let mut f = SettingsForm::from_config(&base);
+        f.context = [true, true, true];
+        let cfg = f.to_config(&base).unwrap();
+        assert!(!cfg.llm.context.enabled);
     }
 
     #[test]

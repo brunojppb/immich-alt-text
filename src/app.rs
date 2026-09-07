@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use crate::config::Config;
 use crate::events::{Action, Command, Event, Key, Stage};
-use crate::settings::{SettingsForm, CONTEXT_DATE, CONTEXT_PEOPLE, DRY_RUN, THEME};
+use crate::settings::{is_context_row, SettingsForm, DRY_RUN, THEME};
 
 pub const LOG_CAP: usize = 500;
 pub const RATE_WINDOW: usize = 20;
@@ -383,15 +383,11 @@ impl App {
                 self.settings.select_dry_run_next();
                 None
             }
-            Key::Left | Key::Char('h')
-                if (CONTEXT_PEOPLE..=CONTEXT_DATE).contains(&self.settings.focused) =>
-            {
+            Key::Left | Key::Char('h') if is_context_row(self.settings.focused) => {
                 self.settings.select_context_prev();
                 None
             }
-            Key::Right | Key::Char('l')
-                if (CONTEXT_PEOPLE..=CONTEXT_DATE).contains(&self.settings.focused) =>
-            {
+            Key::Right | Key::Char('l') if is_context_row(self.settings.focused) => {
                 self.settings.select_context_next();
                 None
             }
