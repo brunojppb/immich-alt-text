@@ -4,6 +4,7 @@ pub mod engine;
 pub mod events;
 pub mod immich;
 pub mod llm;
+pub mod prompt;
 pub mod settings;
 pub mod theme;
 pub mod ui;
