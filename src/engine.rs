@@ -771,7 +771,7 @@ mod tests {
     use tokio_util::sync::CancellationToken;
 
     use super::prepare;
-    use crate::config::{Config, ImmichConfig, LlmConfig, RunConfig, UiConfig};
+    use crate::config::{Config, ContextConfig, ImmichConfig, LlmConfig, RunConfig, UiConfig};
     use crate::events::Event;
     use crate::immich::Asset;
 
@@ -789,6 +789,7 @@ mod tests {
                 max_tokens: 100,
                 timeout_secs: 5,
                 prompt: "describe".into(),
+                context: ContextConfig::default(),
             },
             run: RunConfig {
                 workers: 1,

@@ -3,7 +3,9 @@ use std::sync::{Arc, Condvar, Mutex as StdMutex};
 use std::time::Duration;
 
 use base64::Engine as _;
-use immich_alt_text::config::{Config, ImmichConfig, LlmConfig, RunConfig, UiConfig};
+use immich_alt_text::config::{
+    Config, ContextConfig, ImmichConfig, LlmConfig, RunConfig, UiConfig,
+};
 use immich_alt_text::engine::{self, EngineOptions};
 use immich_alt_text::events::{Command, Event, Stage};
 use serde_json::json;
@@ -37,6 +39,7 @@ fn config_with_run(
             max_tokens: 50,
             timeout_secs: 5,
             prompt: "describe".into(),
+            context: ContextConfig::default(),
         },
         run: RunConfig {
             workers,

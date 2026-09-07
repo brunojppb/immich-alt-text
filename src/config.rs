@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use serde::{Deserialize, Serialize};
 
 /// Prompt used when the config file does not set `llm.prompt`.
-pub const DEFAULT_PROMPT: &str = "Write alt text for this photo: one or two plain sentences describing what is visible. No preamble, no quotes, no \"This image shows\".";
+pub const DEFAULT_PROMPT: &str = "Write alt text for this photo: one or two plain sentences describing what is visible. Name the people when they are clearly the subject. Use the context only where the image supports it. Do not list the context back. No preamble, no quotes, no \"This image shows\".";
 pub const MAX_WORKERS: usize = 64;
 pub const MAX_RETRIES: u32 = 10;
 pub const MAX_PAGE_SIZE: u32 = 1000;
@@ -53,6 +53,7 @@ pub struct LlmConfig {
     pub max_tokens: u32,
     pub timeout_secs: u64,
     pub prompt: String,
+    pub context: ContextConfig,
 }
 
 impl Default for LlmConfig {
@@ -64,6 +65,28 @@ impl Default for LlmConfig {
             max_tokens: 200,
             timeout_secs: 120,
             prompt: DEFAULT_PROMPT.into(),
+            context: ContextConfig::default(),
+        }
+    }
+}
+
+/// Which library facts the prompt may carry.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ContextConfig {
+    pub enabled: bool,
+    pub people: bool,
+    pub place: bool,
+    pub date: bool,
+}
+
+impl Default for ContextConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            people: true,
+            place: true,
+            date: true,
         }
     }
 }
@@ -389,6 +412,7 @@ mod tests {
                 max_tokens: 200,
                 timeout_secs: 120,
                 prompt: "describe".into(),
+                context: ContextConfig::default(),
             },
             run: RunConfig {
                 workers: 2,
@@ -614,5 +638,48 @@ mod tests {
         assert!(p.ends_with("immich-alt-text/config.toml"), "{p:?}");
         let s = state_dir();
         assert!(s.ends_with("immich-alt-text"), "{s:?}");
+    }
+
+    #[test]
+    fn context_switches_default_to_on() {
+        let cfg = Config::default();
+        assert!(cfg.llm.context.enabled);
+        assert!(cfg.llm.context.people);
+        assert!(cfg.llm.context.place);
+        assert!(cfg.llm.context.date);
+    }
+
+    #[test]
+    fn a_file_without_a_context_section_keeps_the_switches_on() {
+        let toml = r#"
+[immich]
+url = "https://photos.example"
+api_key = "key"
+
+[llm]
+model = "m"
+"#;
+        let cfg: Config = toml::from_str(toml).unwrap();
+        assert!(cfg.llm.context.enabled);
+        assert!(cfg.llm.context.people);
+    }
+
+    #[test]
+    fn a_saved_file_keeps_the_context_switches() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let mut cfg = full();
+        cfg.llm.context.place = false;
+        cfg.llm.context.date = false;
+        save(&path, &cfg).unwrap();
+        let loaded = load(&path).unwrap().unwrap();
+        assert!(loaded.llm.context.people);
+        assert!(!loaded.llm.context.place);
+        assert!(!loaded.llm.context.date);
+    }
+
+    #[test]
+    fn the_default_prompt_asks_for_names() {
+        assert!(DEFAULT_PROMPT.contains("Name the people"));
     }
 }

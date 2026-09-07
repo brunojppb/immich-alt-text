@@ -409,7 +409,7 @@ mod tests {
     use clap::Parser;
     use immich_alt_text::app::{App, RunState, Screen};
     use immich_alt_text::config::{
-        Config, ImmichConfig, LlmConfig, RunConfig, ThemeName, UiConfig,
+        Config, ContextConfig, ImmichConfig, LlmConfig, RunConfig, ThemeName, UiConfig,
     };
     use immich_alt_text::engine;
     use immich_alt_text::events::{Action, Event, Key};
@@ -452,6 +452,7 @@ mod tests {
                 max_tokens: 100,
                 timeout_secs: 5,
                 prompt: "describe".into(),
+                context: ContextConfig::default(),
             },
             run: RunConfig {
                 workers: 1,
