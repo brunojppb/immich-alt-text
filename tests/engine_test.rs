@@ -180,6 +180,7 @@ async fn mount_search_page(
         .and(body_json(json!({
             "type": "IMAGE",
             "withExif": true,
+            "withPeople": true,
             "size": size,
             "page": page,
             "order": "desc",

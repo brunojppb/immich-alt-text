@@ -773,7 +773,7 @@ mod tests {
     use super::prepare;
     use crate::config::{Config, ContextConfig, ImmichConfig, LlmConfig, RunConfig, UiConfig};
     use crate::events::Event;
-    use crate::immich::Asset;
+    use crate::immich::{Asset, AssetContext};
 
     fn config() -> Config {
         Config {
@@ -856,6 +856,7 @@ mod tests {
                 id: "a1".into(),
                 name: "IMG_1.HEIC".into(),
                 description: None,
+                context: AssetContext::default(),
             })
             .await
             .expect("asset receiver is open");
