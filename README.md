@@ -41,11 +41,15 @@ Place: Sintra, Lisbon, Portugal
 Taken: Friday 14 June 2019, evening
 ```
 
-The application appends the block after your prompt. To place it yourself, put
-`{{context}}` in the prompt. The block then replaces the placeholder.
+The application appends the block after your prompt. To place it yourself,
+put `{{context}}` on its own line in the prompt. The block can run several
+lines. It replaces the whole placeholder line. Two placeholders each get
+their own copy of the block.
 
-Each line has a switch. A line with no data disappears. All three switches off
-leave the prompt as you wrote it.
+Each line in the block has a switch. A line with no data disappears. With
+every switch off, the block is empty. A prompt with no placeholder stays as
+you wrote it. A prompt that holds `{{context}}` loses that line, because an
+empty block still replaces it.
 
 #### Privacy
 

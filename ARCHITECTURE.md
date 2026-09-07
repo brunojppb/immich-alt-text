@@ -412,9 +412,9 @@ Text fields accept typing, backspace, and `ctrl-u`. The theme and dry-run rows a
 ╭ settings ────────────────────────────────────────────────────────────╮
 │  immich url         https://photos.example                            │
 │  immich api key     ••••••••                         ctrl-r show     │
-│▸ prompt             Describe the subject and setting of this photo.   │
-│                     Mention important colors, objects, and actions.  │
-│                     Avoid speculation and do not add a preamble.▏    │
+│▸ prompt             Write alt text for this photo: one or two         │
+│                     plain sentences describing what is visible.      │
+│                     Name the people when they are clearly the▏       │
 │  llm timeout (s)    120                                              │
 │  context people     ( ) off   (●) on                                 │
 │  context place      ( ) off   (●) on                                 │

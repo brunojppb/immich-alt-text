@@ -14,6 +14,9 @@ async fn main() {
     let immich = MockServer::start().await;
     let llm = MockServer::start().await;
 
+    // Every fourth asset carries a person name, a city, and a local date, so
+    // a manual run shows the context block.
+    let names = ["Ana", "Marco", "Sofia"];
     let items: Vec<serde_json::Value> = (1..=40)
         .map(|i| {
             let description = if i % 7 == 0 {
@@ -21,11 +24,19 @@ async fn main() {
             } else {
                 None
             };
+            let people = if i % 4 == 0 {
+                let name = names[(i as usize / 4 - 1) % names.len()];
+                json!([{ "name": name, "isHidden": false }])
+            } else {
+                serde_json::Value::Null
+            };
             json!({
                 "id": format!("asset-{i:03}"),
                 "originalFileName": format!("IMG_{:04}.HEIC", 4400 + i),
                 "type": "IMAGE",
-                "exifInfo": { "description": description }
+                "people": people,
+                "exifInfo": { "description": description, "city": "Sintra" },
+                "localDateTime": "2019-06-14T19:23:00.000Z",
             })
         })
         .collect();

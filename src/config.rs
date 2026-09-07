@@ -53,6 +53,7 @@ pub struct LlmConfig {
     pub max_tokens: u32,
     pub timeout_secs: u64,
     pub prompt: String,
+    /// Stays last: the TOML writer emits plain values before tables.
     pub context: ContextConfig,
 }
 

@@ -1430,8 +1430,8 @@ async fn restart_start_is_live_when_previous_run_finished_on_saturated_events() 
 async fn the_completion_request_carries_the_person_name() {
     let immich = MockServer::start().await;
     let llm = MockServer::start().await;
-    // Same fixture shape as `src/immich.rs`'s asset-context tests: a named,
-    // non-hidden person plus a city.
+    // A named, non-hidden person and a city, so the request below can assert
+    // the completion request carries "People: Ana".
     Mock::given(method("POST"))
         .and(path("/api/search/metadata"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
