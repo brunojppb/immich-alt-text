@@ -31,6 +31,7 @@ fn config_with_run(
             url: immich.uri(),
             api_key: "k".into(),
             timeout_secs: 5,
+            tag: String::new(),
         },
         llm: LlmConfig {
             base_url: format!("{}/v1", llm.uri()),
@@ -46,6 +47,7 @@ fn config_with_run(
             retries,
             page_size,
             dry_run: false,
+            overwrite: false,
         },
         ui: UiConfig::default(),
     }

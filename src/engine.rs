@@ -785,6 +785,7 @@ mod tests {
                 url: "http://127.0.0.1:3001".into(),
                 api_key: "key".into(),
                 timeout_secs: 5,
+                tag: String::new(),
             },
             llm: LlmConfig {
                 base_url: "http://127.0.0.1:3002/v1".into(),
@@ -800,6 +801,7 @@ mod tests {
                 retries: 0,
                 page_size: 10,
                 dry_run: false,
+                overwrite: false,
             },
             ui: UiConfig::default(),
         }

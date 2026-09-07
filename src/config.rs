@@ -32,6 +32,8 @@ pub struct ImmichConfig {
     pub url: String,
     pub api_key: String,
     pub timeout_secs: u64,
+    /// Tag added to each described asset. Empty means no tag.
+    pub tag: String,
 }
 
 impl Default for ImmichConfig {
@@ -40,7 +42,16 @@ impl Default for ImmichConfig {
             url: String::new(),
             api_key: String::new(),
             timeout_secs: 30,
+            tag: String::new(),
         }
+    }
+}
+
+impl ImmichConfig {
+    /// The tag a run adds to each asset, or `None` when the user set no tag.
+    pub fn active_tag(&self) -> Option<&str> {
+        let tag = self.tag.trim();
+        (!tag.is_empty()).then_some(tag)
     }
 }
 
@@ -99,6 +110,7 @@ pub struct RunConfig {
     pub retries: u32,
     pub page_size: u32,
     pub dry_run: bool,
+    pub overwrite: bool,
 }
 
 impl Default for RunConfig {
@@ -108,6 +120,7 @@ impl Default for RunConfig {
             retries: 3,
             page_size: 1000,
             dry_run: false,
+            overwrite: false,
         }
     }
 }
@@ -391,6 +404,15 @@ impl Config {
             )));
         }
 
+        // Immich splits the value on `/` to nest tags, so an empty part would
+        // ask for a tag with no name.
+        let tag = self.immich.tag.trim();
+        if !tag.is_empty() && tag.split('/').any(|part| part.trim().is_empty()) {
+            return Err(invalid(
+                "immich.tag must not have an empty part; use gen-desc or ai/alt-text",
+            ));
+        }
+
         Ok(())
     }
 }
@@ -405,6 +427,7 @@ mod tests {
                 url: "https://photos.home.lan".into(),
                 api_key: "k1".into(),
                 timeout_secs: 30,
+                tag: String::new(),
             },
             llm: LlmConfig {
                 base_url: "http://localhost:1234/v1".into(),
@@ -420,6 +443,7 @@ mod tests {
                 retries: 3,
                 page_size: 500,
                 dry_run: false,
+                overwrite: false,
             },
             ui: UiConfig {
                 theme: ThemeName::Mono,
@@ -677,5 +701,69 @@ model = "m"
         assert!(loaded.llm.context.people);
         assert!(!loaded.llm.context.place);
         assert!(!loaded.llm.context.date);
+    }
+
+    #[test]
+    fn the_tag_and_overwrite_keys_default_to_off() {
+        let cfg = Config::default();
+        assert_eq!(cfg.immich.tag, "");
+        assert_eq!(cfg.immich.active_tag(), None);
+        assert!(!cfg.run.overwrite);
+    }
+
+    #[test]
+    fn a_file_without_the_new_keys_takes_the_defaults() {
+        let toml = r#"
+[immich]
+url = "https://photos.example"
+api_key = "key"
+
+[llm]
+model = "m"
+"#;
+        let cfg: Config = toml::from_str(toml).unwrap();
+        assert_eq!(cfg.immich.tag, "");
+        assert!(!cfg.run.overwrite);
+    }
+
+    #[test]
+    fn a_saved_file_keeps_the_tag_and_the_overwrite_value() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let mut cfg = full();
+        cfg.immich.tag = "gen-desc".into();
+        cfg.run.overwrite = true;
+        save(&path, &cfg).unwrap();
+        let loaded = load(&path).unwrap().unwrap();
+        assert_eq!(loaded.immich.tag, "gen-desc");
+        assert!(loaded.run.overwrite);
+    }
+
+    #[test]
+    fn active_tag_trims_the_value() {
+        let mut cfg = full();
+        cfg.immich.tag = "  gen-desc  ".into();
+        assert_eq!(cfg.immich.active_tag(), Some("gen-desc"));
+        cfg.immich.tag = "   ".into();
+        assert_eq!(cfg.immich.active_tag(), None);
+    }
+
+    #[test]
+    fn accepts_a_plain_tag_and_a_nested_tag() {
+        for value in ["gen-desc", "ai/alt-text", ""] {
+            let mut cfg = full();
+            cfg.immich.tag = value.into();
+            assert!(cfg.validate().is_ok(), "{value} must pass");
+        }
+    }
+
+    #[test]
+    fn rejects_a_tag_with_an_empty_part() {
+        for value in ["/a", "a/", "a//b", "/"] {
+            let mut cfg = full();
+            cfg.immich.tag = value.into();
+            let err = cfg.validate().unwrap_err().to_string();
+            assert!(err.contains("immich.tag"), "{value}: {err}");
+        }
     }
 }
