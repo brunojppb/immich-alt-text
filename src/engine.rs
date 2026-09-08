@@ -418,7 +418,7 @@ impl Engine {
 
         loop {
             let result = self
-                .retry(&token, true, || {
+                .retry(&token, None, true, || {
                     self.immich.list_images(page, self.config.run.page_size)
                 })
                 .await;
@@ -570,7 +570,7 @@ impl Engine {
             return Outcome::Cancelled;
         }
         let jpeg = self
-            .retry(token, true, || self.immich.preview_jpeg(&id))
+            .retry(token, Some(&id), true, || self.immich.preview_jpeg(&id))
             .await;
         let jpeg = match jpeg {
             Ok(jpeg) => jpeg,
@@ -591,7 +591,9 @@ impl Engine {
             &self.config.llm.context,
         );
         let text = self
-            .retry(token, true, || self.llm.describe(&jpeg, &full_prompt))
+            .retry(token, Some(&id), true, || {
+                self.llm.describe(&jpeg, &full_prompt)
+            })
             .await;
         let text = match text {
             Ok(text) => text,
@@ -608,7 +610,9 @@ impl Engine {
                 return Outcome::Cancelled;
             }
             if let Err(error) = self
-                .retry(token, false, || self.immich.set_description(&id, &text))
+                .retry(token, Some(&id), false, || {
+                    self.immich.set_description(&id, &text)
+                })
                 .await
             {
                 return self
@@ -623,7 +627,9 @@ impl Engine {
                 // Like the description write: once the tool starts changing an
                 // asset, it waits for the answer.
                 if let Err(error) = self
-                    .retry(token, false, || self.immich.tag_asset(tag_id, &id))
+                    .retry(token, Some(&id), false, || {
+                        self.immich.tag_asset(tag_id, &id)
+                    })
                     .await
                 {
                     return self
@@ -652,9 +658,12 @@ impl Engine {
         Outcome::Done
     }
 
+    /// Runs `op`, repeating it on transient failure with a doubling backoff.
+    /// `asset` names the asset whose stage this is, so the UI can show the try.
     async fn retry<T, E, F, Fut>(
         &self,
         token: &CancellationToken,
+        asset: Option<&str>,
         cancel_in_flight: bool,
         mut op: F,
     ) -> Result<T, StageError>
@@ -696,6 +705,17 @@ impl Engine {
                         _ = tokio::time::sleep(delay) => {}
                     }
                     attempt = attempt.saturating_add(1);
+                    if let Some(id) = asset {
+                        self.emit_run(
+                            token,
+                            Event::AssetRetry {
+                                id: id.to_string(),
+                                attempt,
+                                attempts,
+                            },
+                        )
+                        .await;
+                    }
                 }
                 Err(StageError::Transient(message)) => {
                     return Err(StageError::Transient(format!(
@@ -715,7 +735,7 @@ impl Engine {
         let Some(tag) = self.config.immich.active_tag() else {
             return Ok(None);
         };
-        self.retry(token, true, || self.immich.upsert_tag(tag))
+        self.retry(token, None, true, || self.immich.upsert_tag(tag))
             .await
             .map(Some)
     }

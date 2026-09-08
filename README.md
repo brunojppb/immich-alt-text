@@ -232,7 +232,7 @@ base_url = "http://localhost:1234/v1"
 api_key = ""            # optional
 model = "gemma-3-12b-it"
 max_tokens = 200
-timeout_secs = 120
+timeout_secs = 120     # per attempt, not per photo; see retries below
 prompt = """
 Write alt text for this photo: one or two plain sentences describing what is
 visible. No preamble, no quotes, no "This image shows".
@@ -259,6 +259,16 @@ theme = "btop"          # or "mono"
 lets you change the prompt, the Immich tag, and the three context switches. It
 also lets you change Immich and LLM timeouts, retry count, dry-run mode,
 overwrite mode, and UI theme.
+
+### How long one photo can take
+
+`timeout_secs` caps one HTTP call, not one photo. The tool retries a timeout,
+because a timeout is usually temporary. With `timeout_secs = 120` and
+`retries = 3`, the LLM step makes 4 calls. It waits 2 s, 4 s, and 8 s between
+them. So one photo can spend up to 494 seconds in the LLM step.
+
+The in-flight row shows the try while a step repeats, for example
+`calling llm 3/4…`. To cap the time per photo instead, lower `retries`.
 
 The prompt editor supports multiple lines. Use the arrow keys to move in the prompt. Press `enter` to add a line break. Press `ctrl-u` to replace the prompt.
 

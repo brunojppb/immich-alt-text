@@ -25,12 +25,21 @@ pub enum RunState {
     Error(String),
 }
 
+/// Which try the current stage is on, once it repeats.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Attempt {
+    pub number: u32,
+    pub total: u32,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InFlight {
     pub id: String,
     pub name: String,
     pub stage: Stage,
     pub started_at: Instant,
+    /// `None` until the stage repeats.
+    pub retry: Option<Attempt>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -129,11 +138,25 @@ impl App {
                 id,
                 name,
                 stage: Stage::Fetching,
+                retry: None,
                 started_at: Instant::now(),
             }),
+            Event::AssetRetry {
+                id,
+                attempt,
+                attempts,
+            } => {
+                if let Some(in_flight) = self.in_flight.iter_mut().find(|entry| entry.id == id) {
+                    in_flight.retry = Some(Attempt {
+                        number: attempt,
+                        total: attempts,
+                    });
+                }
+            }
             Event::AssetStage { id, stage } => {
                 if let Some(in_flight) = self.in_flight.iter_mut().find(|entry| entry.id == id) {
                     in_flight.stage = stage;
+                    in_flight.retry = None;
                 }
             }
             Event::AssetDone {
@@ -563,6 +586,35 @@ mod tests {
             Screen::Settings
         );
         assert_eq!(app().screen, Screen::Run);
+    }
+
+    #[test]
+    fn retry_events_track_the_attempt_and_a_new_stage_clears_it() {
+        let mut a = app();
+        a.on_event(Event::AssetStarted {
+            id: "1".into(),
+            name: "1".into(),
+        });
+        assert_eq!(a.in_flight[0].retry, None);
+
+        a.on_event(Event::AssetRetry {
+            id: "1".into(),
+            attempt: 3,
+            attempts: 4,
+        });
+        assert_eq!(
+            a.in_flight[0].retry,
+            Some(Attempt {
+                number: 3,
+                total: 4
+            })
+        );
+
+        a.on_event(Event::AssetStage {
+            id: "1".into(),
+            stage: Stage::Writing,
+        });
+        assert_eq!(a.in_flight[0].retry, None, "a new stage starts fresh");
     }
 
     #[test]

@@ -1,7 +1,7 @@
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
-use immich_alt_text::app::{App, InFlight, LogRow, RunState, Screen};
+use immich_alt_text::app::{App, Attempt, InFlight, LogRow, RunState, Screen};
 use immich_alt_text::config::{Config, Overrides, ThemeName};
 use immich_alt_text::events::Stage;
 use immich_alt_text::theme::Theme;
@@ -38,6 +38,10 @@ fn running_app(now: Instant) -> App {
         name: "IMG_4471.HEIC".into(),
         stage: Stage::CallingLlm,
         started_at: now - Duration::from_millis(3_200),
+        retry: Some(Attempt {
+            number: 3,
+            total: 4,
+        }),
     });
     app.log.push_back(LogRow::Done {
         at: "18:42:11".into(),

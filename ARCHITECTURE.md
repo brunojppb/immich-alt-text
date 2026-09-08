@@ -248,7 +248,7 @@ Fatal events use a separate terminal-event token. The run token is cancelled bef
 
 ### Retry and error scope
 
-`retry` makes `run.retries + 1` attempts. Only `Transient` errors are retried. The default delays are 2, 4, 8 seconds, and so on. `Permanent` and `Fatal` errors return at once. An exhausted transient error includes the number of attempts.
+`retry` makes `run.retries + 1` attempts. Only `Transient` errors are retried. The default delays are 2, 4, 8 seconds, and so on. `Permanent` and `Fatal` errors return at once. An exhausted transient error includes the number of attempts. Before each further attempt on an asset, `retry` emits `AssetRetry`, and the in-flight row shows the try. A client timeout caps one HTTP call, so one stage can take up to `attempts * timeout_secs` plus the delays.
 
 An asset-local error sends `AssetFailed`. The worker then processes another asset. A fatal error cancels the run and sends `Fatal`. A discovery error stops the run because the engine cannot trust the page stream.
 

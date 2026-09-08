@@ -44,6 +44,12 @@ pub enum Event {
         id: String,
         stage: Stage,
     },
+    /// A stage is about to repeat. `attempt` counts from 2, `attempts` is the cap.
+    AssetRetry {
+        id: String,
+        attempt: u32,
+        attempts: u32,
+    },
     AssetDone {
         id: String,
         name: String,

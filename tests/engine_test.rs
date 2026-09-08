@@ -810,6 +810,81 @@ async fn retries_transient_llm_errors_then_succeeds() {
 }
 
 #[tokio::test]
+async fn reports_each_llm_retry_attempt() {
+    let immich = MockServer::start().await;
+    let llm = MockServer::start().await;
+    mount_immich_basics(&immich, &[("a1", "IMG_1.HEIC", None)]).await;
+    Mock::given(method("PUT"))
+        .and(path("/api/assets/a1"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&immich)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(ResponseTemplate::new(503))
+        .up_to_n_times(2)
+        .mount(&llm)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(completion("third time")))
+        .mount(&llm)
+        .await;
+
+    let (tx, mut rx) = mpsc::channel(256);
+    let handle = engine::spawn_with(config(&immich, &llm), tx, fast()).unwrap();
+    handle.send(Command::Start).await;
+    let events = collect_until(&mut rx, |e| matches!(e, Event::RunFinished { .. })).await;
+
+    let retries: Vec<_> = events
+        .iter()
+        .filter_map(|e| match e {
+            Event::AssetRetry {
+                id,
+                attempt,
+                attempts,
+            } if id == "a1" => Some((*attempt, *attempts)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(retries, vec![(2, 4), (3, 4)], "got {retries:?}");
+    handle.shutdown(Duration::from_secs(1)).await;
+}
+
+/// The failure the user reads must name the timeout and the number of tries.
+/// reqwest reports a timeout only through an error source that `to_string` drops.
+#[tokio::test]
+async fn llm_timeout_failure_names_the_timeout_and_the_tries() {
+    let immich = MockServer::start().await;
+    let llm = MockServer::start().await;
+    mount_immich_basics(&immich, &[("a1", "IMG_1.HEIC", None)]).await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_delay(Duration::from_secs(30)))
+        .mount(&llm)
+        .await;
+
+    let mut cfg = config(&immich, &llm);
+    cfg.llm.timeout_secs = 1;
+    cfg.run.retries = 1;
+
+    let (tx, mut rx) = mpsc::channel(256);
+    let handle = engine::spawn_with(cfg, tx, fast()).unwrap();
+    handle.send(Command::Start).await;
+    let events = collect_until(&mut rx, |e| matches!(e, Event::RunFinished { .. })).await;
+
+    let error = events
+        .iter()
+        .find_map(|e| match e {
+            Event::AssetFailed { error, .. } => Some(error.clone()),
+            _ => None,
+        })
+        .expect("an asset should fail");
+    assert_eq!(error, "llm: timeout after 1 s (2 tries)");
+    handle.shutdown(Duration::from_secs(1)).await;
+}
+
+#[tokio::test]
 async fn gives_up_after_all_attempts_and_continues() {
     let immich = MockServer::start().await;
     let llm = MockServer::start().await;
