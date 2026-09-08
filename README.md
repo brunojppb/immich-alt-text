@@ -15,7 +15,9 @@ For each image without a description, the application:
 3. Sends the image and a short block of library context to an OpenAI-compatible vision model.
 4. Writes the returned description to Immich.
 
-The application does not change images that already have descriptions. Immich stores the progress. You can stop a run and start it again later.
+By default the application does not change images that already have
+descriptions. Immich stores the progress. You can stop a run and start it again
+later.
 
 ### Dry-run mode
 
@@ -27,6 +29,46 @@ You can enable dry-run mode in either way:
 - Set `dry_run = true` in the settings screen.
 
 The CLI flag applies only to the current run. It overrides the saved setting. The settings value is saved for future runs.
+
+### Overwrite mode
+
+Overwrite mode describes every image, including the images that already have a
+description. Use it after you improve the prompt or change the model.
+
+You can turn it on in either way:
+
+- Start the application with `--overwrite`.
+- Set `overwrite = true` in the settings screen.
+
+The CLI flag applies only to the current run. The settings value is saved for
+future runs. The run header shows `OVERWRITE` while the mode is on.
+
+An overwrite run does not resume. A normal run skips the images that already
+have a description, so Immich holds the progress. Overwrite mode ignores that
+mark, so a run you stop describes the same images again when you start it.
+
+### Tags
+
+The application can add an Immich tag to each image it describes. You can then
+ask Immich which images the application wrote. Set the tag in the settings screen or
+in the config file:
+
+```toml
+[immich]
+tag = "gen-desc"        # empty: do not tag
+```
+
+An empty value adds no tag, and that is the default. A value with a `/` creates
+a nested tag: `ai/alt-text` puts `alt-text` under `ai`. The application creates
+the tag on the first run, and reuses it after that.
+
+The application adds the tag after it writes the description. Dry-run mode adds
+no tag. If the tag call fails, the run reports the image as failed, and the
+description stays in Immich.
+
+The tag means "this application wrote a description at least once". It does not
+mean "described": an image whose tag call failed keeps its description and no
+tag.
 
 ### Library context
 
@@ -71,7 +113,13 @@ For normal mode, use an Immich API key with these permissions:
 - `asset.view` to download image previews.
 - `asset.update` to write descriptions.
 
-Dry-run mode does not need `asset.update`.
+A run with a tag needs two more:
+
+- `tag.create` to create the tag, or to find the one that exists.
+- `tag.asset` to add the image to the tag.
+
+Dry-run mode does not need `asset.update`, and it adds no tag, so it needs
+neither tag permission. Overwrite mode needs no extra permission.
 
 The server-version check does not need another permission. Older Immich versions may not support these permissions. On those versions, use a full access API key.
 
@@ -129,6 +177,12 @@ To run without changing Immich descriptions:
 immich-alt-text --dry-run
 ```
 
+To describe images that already have a description:
+
+```bash
+immich-alt-text --overwrite
+```
+
 The first launch opens the settings screen. Enter these values:
 
 - Immich URL
@@ -158,7 +212,7 @@ immich-alt-text --config target/demo-config.toml
 | settings | `ctrl-r` | show or hide API keys |
 | settings | `ctrl-t` | test both connections |
 | settings | `ctrl-s` | save and return to the run screen |
-| settings | `←` `→` or `h` `l` | set a switch: context, theme, or dry run |
+| settings | `←` `→` or `h` `l` | set a switch: context, theme, dry run, or overwrite |
 | settings | `←` `→` `↑` `↓` | move in the prompt |
 | settings | `enter` | add a line break in the prompt |
 | settings | `ctrl-u` | clear the focused text field |
@@ -171,13 +225,14 @@ immich-alt-text --config target/demo-config.toml
 url = "https://photos.home.lan"
 api_key = "..."
 timeout_secs = 30
+tag = ""                # e.g. "gen-desc"; empty: do not tag
 
 [llm]
 base_url = "http://localhost:1234/v1"
 api_key = ""            # optional
 model = "gemma-3-12b-it"
 max_tokens = 200
-timeout_secs = 120
+timeout_secs = 120     # per attempt, not per photo; see retries below
 prompt = """
 Write alt text for this photo: one or two plain sentences describing what is
 visible. No preamble, no quotes, no "This image shows".
@@ -194,12 +249,26 @@ workers = 1             # parallel LLM calls, 1-64
 retries = 3             # 0-10 retries; default backoff is 2 s, 4 s, 8 s
 page_size = 1000        # 1-1000
 dry_run = false         # do not update Immich when true
+overwrite = false       # describe images that already have a description
 
 [ui]
 theme = "btop"          # or "mono"
 ```
 
-`page_size` and `llm.context.enabled` are file-only. The settings screen also lets you change the prompt, the three context switches, Immich and LLM timeouts, retry count, dry-run mode, and UI theme.
+`page_size` and `llm.context.enabled` are file-only. The settings screen also
+lets you change the prompt, the Immich tag, and the three context switches. It
+also lets you change Immich and LLM timeouts, retry count, dry-run mode,
+overwrite mode, and UI theme.
+
+### How long one photo can take
+
+`timeout_secs` caps one HTTP call, not one photo. The tool retries a timeout,
+because a timeout is usually temporary. With `timeout_secs = 120` and
+`retries = 3`, the LLM step makes 4 calls. It waits 2 s, 4 s, and 8 s between
+them. So one photo can spend up to 494 seconds in the LLM step.
+
+The in-flight row shows the try while a step repeats, for example
+`calling llm 3/4…`. To cap the time per photo instead, lower `retries`.
 
 The prompt editor supports multiple lines. Use the arrow keys to move in the prompt. Press `enter` to add a line break. Press `ctrl-u` to replace the prompt.
 

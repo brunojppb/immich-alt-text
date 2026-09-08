@@ -9,7 +9,8 @@ use ratatui::widgets::{Block, BorderType, Clear, List, ListItem, ListState, Para
 use ratatui::Frame;
 
 use super::{fmt_clock, fmt_count, fmt_secs, truncate};
-use crate::app::{App, LogRow, RunState};
+use crate::app::{App, Attempt, LogRow, RunState};
+use crate::events::Stage;
 use crate::theme::Theme;
 
 pub fn render(frame: &mut Frame, app: &App, now: Instant, theme: &Theme) {
@@ -89,6 +90,9 @@ fn header_right(app: &App, theme: &Theme) -> Line<'static> {
     let mut spans = Vec::new();
     if app.is_dry_run() {
         spans.push(Span::styled(" DRY RUN ", theme.warn));
+    }
+    if app.is_overwrite() {
+        spans.push(Span::styled(" OVERWRITE ", theme.warn));
     }
     spans.push(Span::styled(format!(" {label} "), theme.state_style(label)));
     if let RunState::Error(msg) = &app.run_state {
@@ -220,6 +224,14 @@ fn render_counters(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
     frame.render_widget(Paragraph::new(lines), inner);
 }
 
+/// The stage name, with the try count once the stage repeats.
+fn stage_label(stage: Stage, retry: Option<Attempt>) -> String {
+    match retry {
+        Some(attempt) => format!("{} {}/{}…", stage.label(), attempt.number, attempt.total),
+        None => format!("{}…", stage.label()),
+    }
+}
+
 fn render_in_flight(frame: &mut Frame, area: Rect, app: &App, now: Instant, theme: &Theme) {
     let block = boxed("in flight", theme);
     let inner = block.inner(area);
@@ -231,10 +243,7 @@ fn render_in_flight(frame: &mut Frame, area: Rect, app: &App, now: Instant, them
             Line::from(vec![
                 Span::styled("● ", theme.accent),
                 Span::styled(format!("{:<20}", truncate(&f.name, 20)), theme.name),
-                Span::styled(
-                    format!("{:<14}", format!("{}…", f.stage.label())),
-                    theme.info,
-                ),
+                Span::styled(format!("{:<17}", stage_label(f.stage, f.retry)), theme.info),
                 Span::styled(
                     fmt_secs(now.saturating_duration_since(f.started_at)),
                     theme.duration,
@@ -386,4 +395,26 @@ fn render_tiny(frame: &mut Frame, area: Rect, app: &App, _now: Instant, theme: &
     spans.push(Span::styled(counts, theme.value));
     frame.render_widget(Paragraph::new(Line::from(spans)), bar_area);
     render_footer(frame, footer, app, theme);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stage_label_stays_plain_on_the_first_try() {
+        assert_eq!(stage_label(Stage::CallingLlm, None), "calling llm…");
+    }
+
+    #[test]
+    fn stage_label_shows_the_try_once_a_stage_repeats() {
+        let retry = Attempt {
+            number: 3,
+            total: 4,
+        };
+        assert_eq!(
+            stage_label(Stage::CallingLlm, Some(retry)),
+            "calling llm 3/4…"
+        );
+    }
 }

@@ -3,8 +3,10 @@ source: tests/ui_snapshots.rs
 expression: terminal.backend()
 ---
 " ╭ settings ──────────────────────────────────────────────────────────────────╮ "
+" │▸ immich url         https://photos.home.lan▏                               │ "
 " │  immich api key     ••••••••••                                 ctrl-r show │ "
 " │  immich timeout (s) 30                                                     │ "
+" │  immich tag                                                    no tag      │ "
 " │  llm base url       http://localhost:1234/v1                               │ "
 " │  llm api key                                                   ctrl-r show │ "
 " │  llm model          gemma-3-12b-it                                         │ "
@@ -19,8 +21,6 @@ expression: terminal.backend()
 " │  context people     ( ) off   (●) on                                       │ "
 " │  context place      ( ) off   (●) on                                       │ "
 " │  context date       ( ) off   (●) on                                       │ "
-" │  theme              (●) btop   ( ) mono                                    │ "
-" │  dry run            (●) off   ( ) on                                       │ "
 " │                                                                            │ "
 " │  ctrl-t test connections                                                   │ "
 " │  invalid config: run.workers must be at least 1                            │ "

@@ -26,6 +26,7 @@ pub struct LlmClient {
     api_key: String,
     model: String,
     max_tokens: u32,
+    timeout: Duration,
 }
 
 impl LlmClient {
@@ -48,7 +49,17 @@ impl LlmClient {
             api_key: api_key.to_string(),
             model: model.to_string(),
             max_tokens,
+            timeout,
         })
+    }
+
+    /// Maps a transport failure. Names a timeout, which reqwest reports only
+    /// through the error source that `to_string` drops.
+    fn transport(&self, error: reqwest::Error) -> LlmError {
+        if error.is_timeout() {
+            return LlmError::Transient(format!("timeout after {} s", self.timeout.as_secs()));
+        }
+        LlmError::Transient(error.to_string())
     }
 
     fn authorize(&self, req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
@@ -68,7 +79,11 @@ impl LlmClient {
         let method = req.method().clone();
         let path = req.url().path().to_string();
         let started = std::time::Instant::now();
-        let resp = self.http.execute(req).await.map_err(transport)?;
+        let resp = self
+            .http
+            .execute(req)
+            .await
+            .map_err(|e| self.transport(e))?;
 
         tracing::debug!(
             %method,
@@ -113,10 +128,14 @@ impl LlmClient {
                     .json(&body),
             )
             .await?;
-        let parsed: Completion = resp
-            .json()
-            .await
-            .map_err(|error| LlmError::Permanent(format!("bad response body: {error}")))?;
+        let parsed: Completion = resp.json().await.map_err(|error| {
+            // The deadline can land mid-body, and that deserves another try.
+            if error.is_timeout() {
+                self.transport(error)
+            } else {
+                LlmError::Permanent(format!("bad response body: {error}"))
+            }
+        })?;
         let text = parsed
             .choices
             .into_iter()
@@ -146,10 +165,6 @@ struct Choice {
 #[derive(Deserialize)]
 struct Message {
     content: Option<String>,
-}
-
-fn transport(error: reqwest::Error) -> LlmError {
-    LlmError::Transient(error.to_string())
 }
 
 async fn check_status(resp: reqwest::Response) -> Result<reqwest::Response, LlmError> {
@@ -385,6 +400,89 @@ mod tests {
             .await;
         let err = client(&server, "k").await.ping().await.unwrap_err();
         assert!(matches!(err, LlmError::Fatal(_)), "{err}");
+    }
+
+    /// Serves response headers at once, then stalls without a body.
+    /// Models a proxy that answers fast while the model still thinks.
+    async fn stalling_server() -> u16 {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            while let Ok((mut sock, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                    let mut buf = [0u8; 65536];
+                    let _ = sock.read(&mut buf).await;
+                    let _ = sock
+                        .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 4096\r\n\r\n")
+                        .await;
+                    let _ = sock.flush().await;
+                    std::future::pending::<()>().await;
+                });
+            }
+        });
+        port
+    }
+
+    #[tokio::test]
+    async fn timeout_error_names_the_timeout() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_delay(Duration::from_secs(30)))
+            .mount(&server)
+            .await;
+        let client = LlmClient::new(
+            &format!("{}/v1", server.uri()),
+            "k",
+            "gemma",
+            200,
+            Duration::from_secs(1),
+        )
+        .unwrap();
+
+        let err = client.describe(JPEG, "p").await.unwrap_err();
+        assert!(
+            err.to_string().contains("timeout after 1 s"),
+            "want the timeout named, got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn stalled_response_body_is_transient() {
+        let port = stalling_server().await;
+        let client = LlmClient::new(
+            &format!("http://127.0.0.1:{port}/v1"),
+            "k",
+            "gemma",
+            200,
+            Duration::from_secs(1),
+        )
+        .unwrap();
+
+        let err = client.describe(JPEG, "p").await.unwrap_err();
+        assert!(matches!(err, LlmError::Transient(_)), "{err}");
+        assert!(
+            err.to_string().contains("timeout after 1 s"),
+            "want the timeout named, got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn malformed_response_body_is_permanent() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("not-json!"))
+            .mount(&server)
+            .await;
+
+        let err = client(&server, "k")
+            .await
+            .describe(JPEG, "p")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, LlmError::Permanent(_)), "{err}");
     }
 
     #[tokio::test]

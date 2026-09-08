@@ -3,12 +3,12 @@ source: tests/ui_snapshots.rs
 expression: terminal.backend()
 ---
 "╭ settings ────────────────────────────╮"
-"│  workers            1                │"
-"│  retries            3                │"
-"│  max tokens         200              │"
 "│  context people     ( ) off   (●) on │"
 "│  context place      ( ) off   (●) on │"
 "│  context date       ( ) off   (●) on │"
 "│▸ theme              (●) btop   ( ) mo│"
+"│                                      │"
+"│  ctrl-t test connections             │"
+"│                                      │"
 "│ ctrl-s save    ctrl-t test    ← → sel│"
 "╰──────────────────────────────────────╯"

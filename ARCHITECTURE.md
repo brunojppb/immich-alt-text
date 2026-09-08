@@ -6,9 +6,14 @@ This document describes the code on the current `main` branch. It explains the m
 
 `immich-alt-text` is a Rust terminal application. It finds Immich images with no description. It downloads a preview image. It asks an OpenAI-compatible vision model for a description. The request also carries a short block of library context: the people Immich recognised, the place, and the local date.
 
-In normal mode, the application writes the description to Immich. In dry-run mode, it does not write to Immich. Both modes perform the search, preview download, and model request.
+In normal mode, the application writes the description to Immich, and adds the
+configured tag to the asset. In dry-run mode, it does not write to Immich.
+Both modes perform the search, preview download, and model request.
 
-Immich stores the progress. A later normal run searches again. It skips images that already have descriptions. The application has no database, queue service, daemon, or background process.
+Immich stores the progress. A later normal run searches again. It skips images
+that already have descriptions. Overwrite mode ignores that mark, so an
+overwrite run has no resume position. The application has no database, queue
+service, daemon, or background process.
 
 ### Main modules
 
@@ -35,7 +40,6 @@ This application is not a general asset synchronization service. It does not:
 - watch for new photos;
 - run on a schedule;
 - store local run data;
-- edit tags;
 - create releases;
 - run as a background service; or
 - keep a local resume position.
@@ -199,6 +203,10 @@ Each accepted `Start` creates a new run with:
 - an active flag; and
 - a run task.
 
+Each run resolves the tag before it starts the workers. A run with no tag, and
+a dry run, skip that step. A failed resolution cancels the run and sends
+`Fatal`, so a key without `tag.create` costs one message and no work.
+
 An active run ignores another `Start`. A completed or cancelled run can be replaced. If a cancelled run still has an active Immich write, the control loop waits for that task. This prevents old and new writes from overlapping.
 
 `Engine::run` starts `workers` worker tasks. It also starts discovery. The asset channel has a size of `workers * 4`. This limits the number of prefetched assets. Workers lock the receiver only while they receive an asset. Network requests run after they release the lock.
@@ -213,9 +221,14 @@ When discovery ends, it drops the asset sender. This tells workers that no more 
 
 In normal mode, the event order is:
 
-`AssetStarted` -> `Fetching` -> preview GET -> `CallingLlm` -> completion POST -> `Writing` -> description PUT -> `AssetDone`.
+`AssetStarted` -> `Fetching` -> preview GET -> `CallingLlm` -> completion POST
+-> `Writing` -> description PUT -> `Tagging` -> tag PUT -> `AssetDone`.
 
-In dry-run mode, the `Writing` stage and description `PUT` do not occur. The application still sends the preview request and the completion request. It still sends `AssetDone` with the generated text.
+The `Tagging` stage and the tag `PUT` occur only when the config sets
+`immich.tag`. In dry-run mode, the `Writing` stage, the `Tagging` stage, and
+both `PUT` requests do not occur. The application still sends the preview
+request and the completion request. It still sends `AssetDone` with the
+generated text.
 
 Events from different assets can appear in any order. The final counters use atomic values.
 
@@ -235,7 +248,7 @@ Fatal events use a separate terminal-event token. The run token is cancelled bef
 
 ### Retry and error scope
 
-`retry` makes `run.retries + 1` attempts. Only `Transient` errors are retried. The default delays are 2, 4, 8 seconds, and so on. `Permanent` and `Fatal` errors return at once. An exhausted transient error includes the number of attempts.
+`retry` makes `run.retries + 1` attempts. Only `Transient` errors are retried. The default delays are 2, 4, 8 seconds, and so on. `Permanent` and `Fatal` errors return at once. An exhausted transient error includes the number of attempts. Before each further attempt on an asset, `retry` emits `AssetRetry`, and the in-flight row shows the try. A client timeout caps one HTTP call, so one stage can take up to `attempts * timeout_secs` plus the delays.
 
 An asset-local error sends `AssetFailed`. The worker then processes another asset. A fatal error cancels the run and sends `Fatal`. A discovery error stops the run because the engine cannot trust the page stream.
 
@@ -253,6 +266,7 @@ flowchart TD
     Text{Text is nonblank?}
     DryRun{Dry run?}
     Write[Update Immich description]
+    Tag[Tag asset in Immich]
     Done[AssetDone]
     Skip[Skip image]
     Fail[Send failure]
@@ -270,11 +284,13 @@ flowchart TD
     Text -->|yes| DryRun
     DryRun -->|yes| Done
     DryRun -->|no| Write
-    Write --> Done
+    Write --> Tag
+    Tag --> Done
     Search -.-> UI
     Preview -.-> UI
     Complete -.-> UI
     Write -.-> UI
+    Tag -.-> UI
     Done --> UI
     Fail --> UI
 ```
@@ -287,8 +303,15 @@ It provides these operations:
 
 - `version`: `GET /api/server/version` for connection tests;
 - `list_images`: `POST /api/search/metadata` for newest-first image pages, with `withExif` and `withPeople`;
-- `preview_jpeg`: `GET /api/assets/{id}/thumbnail?size=preview`; and
-- `set_description`: `PUT /api/assets/{id}` with a JSON description.
+- `preview_jpeg`: `GET /api/assets/{id}/thumbnail?size=preview`;
+- `set_description`: `PUT /api/assets/{id}` with a JSON description;
+- `upsert_tag`: `PUT /api/tags` to create the tag or find the one that exists;
+  and
+- `tag_asset`: `PUT /api/tags/{id}/assets` to add one asset to the tag.
+
+`tag_asset` reads the response body. Immich answers `200` and reports a
+per-asset failure inside it. A `duplicate` error counts as success, because the
+asset already carries the tag. Any other error is permanent.
 
 Missing EXIF data, `null` descriptions, and whitespace-only descriptions need a new description. The client treats invalid search data and invalid `nextPage` values as permanent errors.
 
@@ -336,6 +359,7 @@ Serde defaults fill missing sections and keys.
 | `immich.url` | empty | must use `http` or `https` |
 | `immich.api_key` | empty | must not be blank |
 | `immich.timeout_secs` | `30` | no extra range check |
+| `immich.tag` | empty | empty adds no tag; no part may be empty |
 | `llm.base_url` | `http://localhost:1234/v1` | must use `http` or `https` |
 | `llm.api_key` | empty | optional |
 | `llm.model` | empty | must not be blank |
@@ -350,9 +374,13 @@ Serde defaults fill missing sections and keys.
 | `run.retries` | `3` | 0 through 10 |
 | `run.page_size` | `1000` | 1 through 1000, file only |
 | `run.dry_run` | `false` | skips description updates when true |
+| `run.overwrite` | `false` | describes every image when true |
 | `ui.theme` | `btop` | `btop` or `mono` |
 
-The settings form edits the prompt, the three context switches, timeouts, retry count, dry-run value, theme, URLs, keys, model, workers, and max tokens. `page_size` and `llm.context.enabled` are file-only.
+The settings form edits the prompt, the Immich tag, and the three context
+switches. It also edits timeouts, retry count, dry-run value, overwrite value,
+theme, URLs, keys, model, workers, and max tokens. `page_size` and
+`llm.context.enabled` are file-only.
 
 The three context rows sit after `max tokens` and before `theme`. They are selector rows, like `theme` and `dry run`, so the form holds them past the end of the text-field list.
 
@@ -412,6 +440,7 @@ Text fields accept typing, backspace, and `ctrl-u`. The theme and dry-run rows a
 ╭ settings ────────────────────────────────────────────────────────────╮
 │  immich url         https://photos.example                            │
 │  immich api key     ••••••••                         ctrl-r show     │
+│  immich tag         gen-desc                                         │
 │▸ prompt             Write alt text for this photo: one or two         │
 │                     plain sentences describing what is visible.      │
 │                     No preamble, no quotes.▏                         │
@@ -421,6 +450,7 @@ Text fields accept typing, backspace, and `ctrl-u`. The theme and dry-run rows a
 │  context date       ( ) off   (●) on                                 │
 │  theme              (●) btop   ( ) mono                              │
 │  dry run            (●) off   ( ) on                                 │
+│  overwrite          (●) off   ( ) on                                 │
 │  ctrl-t test connections   immich ✓ v3.1.0   llm ✓ 200 OK             │
 │ ctrl-s save    ctrl-t test    ← → select    ctrl-u clear    esc back  │
 ╰──────────────────────────────────────────────────────────────────────╯

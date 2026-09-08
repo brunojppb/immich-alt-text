@@ -327,6 +327,21 @@ impl Engine {
         active: Arc<AtomicBool>,
     ) {
         let started = Instant::now();
+        // One failure here beats one failure for each asset, so the run stops
+        // before the workers start.
+        let tag_id = match self.resolve_tag(&token).await {
+            Ok(tag_id) => tag_id,
+            Err(StageError::Cancelled) => {
+                active.store(false, Ordering::Release);
+                return;
+            }
+            Err(error) => {
+                self.fail_run(&token, &terminal_cancel, error.to_string())
+                    .await;
+                active.store(false, Ordering::Release);
+                return;
+            }
+        };
         let workers = self.config.run.workers.max(1);
         let (asset_tx, asset_rx) = mpsc::channel::<Asset>(workers.saturating_mul(4));
         let asset_rx = Arc::new(Mutex::new(asset_rx));
@@ -342,6 +357,7 @@ impl Engine {
                 asset_rx.clone(),
                 done.clone(),
                 failed.clone(),
+                tag_id.clone(),
             ));
         }
 
@@ -387,7 +403,8 @@ impl Engine {
         }
     }
 
-    /// Pages through Immich and queues assets that need a description.
+    /// Pages through Immich and queues assets for this run: those needing a
+    /// description, or every asset when overwrite mode is on.
     /// Dropping `asset_tx` at the end tells the workers to stop.
     async fn discover(
         self: Arc<Self>,
@@ -401,7 +418,7 @@ impl Engine {
 
         loop {
             let result = self
-                .retry(&token, true, || {
+                .retry(&token, None, true, || {
                     self.immich.list_images(page, self.config.run.page_size)
                 })
                 .await;
@@ -415,11 +432,15 @@ impl Engine {
             };
 
             scanned = scanned.saturating_add(page_data.items.len() as u64);
-            let wanted: Vec<Asset> = page_data
-                .items
-                .into_iter()
-                .filter(|asset| asset.needs_description())
-                .collect();
+            let wanted: Vec<Asset> = if self.config.run.overwrite {
+                page_data.items
+            } else {
+                page_data
+                    .items
+                    .into_iter()
+                    .filter(|asset| asset.needs_description())
+                    .collect()
+            };
             queued = queued.saturating_add(wanted.len() as u64);
             let _ = self
                 .emit_run(&token, Event::PageLoaded { scanned, queued })
@@ -452,6 +473,9 @@ impl Engine {
             .await;
     }
 
+    // A run-scope struct would be the tidier shape here. It touches `run`,
+    // `start_run` and `worker`, so it is left for its own change.
+    #[allow(clippy::too_many_arguments)]
     async fn worker(
         self: Arc<Self>,
         token: CancellationToken,
@@ -460,6 +484,7 @@ impl Engine {
         asset_rx: Arc<Mutex<mpsc::Receiver<Asset>>>,
         done: Arc<AtomicU64>,
         failed: Arc<AtomicU64>,
+        tag_id: Option<String>,
     ) {
         let mut pending = None;
 
@@ -511,7 +536,10 @@ impl Engine {
                 drop(handoff_guard);
             }
 
-            match self.process(&token, &terminal_cancel, &asset).await {
+            match self
+                .process(&token, &terminal_cancel, &asset, tag_id.as_deref())
+                .await
+            {
                 Outcome::Done => {
                     done.fetch_add(1, Ordering::Relaxed);
                 }
@@ -528,6 +556,7 @@ impl Engine {
         token: &CancellationToken,
         terminal_cancel: &CancellationToken,
         asset: &Asset,
+        tag_id: Option<&str>,
     ) -> Outcome {
         if token.is_cancelled() {
             return Outcome::Cancelled;
@@ -541,7 +570,7 @@ impl Engine {
             return Outcome::Cancelled;
         }
         let jpeg = self
-            .retry(token, true, || self.immich.preview_jpeg(&id))
+            .retry(token, Some(&id), true, || self.immich.preview_jpeg(&id))
             .await;
         let jpeg = match jpeg {
             Ok(jpeg) => jpeg,
@@ -562,7 +591,9 @@ impl Engine {
             &self.config.llm.context,
         );
         let text = self
-            .retry(token, true, || self.llm.describe(&jpeg, &full_prompt))
+            .retry(token, Some(&id), true, || {
+                self.llm.describe(&jpeg, &full_prompt)
+            })
             .await;
         let text = match text {
             Ok(text) => text,
@@ -579,12 +610,32 @@ impl Engine {
                 return Outcome::Cancelled;
             }
             if let Err(error) = self
-                .retry(token, false, || self.immich.set_description(&id, &text))
+                .retry(token, Some(&id), false, || {
+                    self.immich.set_description(&id, &text)
+                })
                 .await
             {
                 return self
                     .fail_asset(token, terminal_cancel, id, name, error)
                     .await;
+            }
+
+            if let Some(tag_id) = tag_id {
+                if !self.stage(token, &id, Stage::Tagging).await {
+                    return Outcome::Cancelled;
+                }
+                // Like the description write: once the tool starts changing an
+                // asset, it waits for the answer.
+                if let Err(error) = self
+                    .retry(token, Some(&id), false, || {
+                        self.immich.tag_asset(tag_id, &id)
+                    })
+                    .await
+                {
+                    return self
+                        .fail_asset(token, terminal_cancel, id, name, error)
+                        .await;
+                }
             }
         }
 
@@ -607,9 +658,12 @@ impl Engine {
         Outcome::Done
     }
 
+    /// Runs `op`, repeating it on transient failure with a doubling backoff.
+    /// `asset` names the asset whose stage this is, so the UI can show the try.
     async fn retry<T, E, F, Fut>(
         &self,
         token: &CancellationToken,
+        asset: Option<&str>,
         cancel_in_flight: bool,
         mut op: F,
     ) -> Result<T, StageError>
@@ -651,6 +705,17 @@ impl Engine {
                         _ = tokio::time::sleep(delay) => {}
                     }
                     attempt = attempt.saturating_add(1);
+                    if let Some(id) = asset {
+                        self.emit_run(
+                            token,
+                            Event::AssetRetry {
+                                id: id.to_string(),
+                                attempt,
+                                attempts,
+                            },
+                        )
+                        .await;
+                    }
                 }
                 Err(StageError::Transient(message)) => {
                     return Err(StageError::Transient(format!(
@@ -660,6 +725,19 @@ impl Engine {
                 Err(error) => return Err(error),
             }
         }
+    }
+
+    /// The tag id for this run. `None` when the run adds no tag.
+    async fn resolve_tag(&self, token: &CancellationToken) -> Result<Option<String>, StageError> {
+        if self.config.run.dry_run {
+            return Ok(None);
+        }
+        let Some(tag) = self.config.immich.active_tag() else {
+            return Ok(None);
+        };
+        self.retry(token, None, true, || self.immich.upsert_tag(tag))
+            .await
+            .map(Some)
     }
 
     async fn fail_asset(
@@ -785,6 +863,7 @@ mod tests {
                 url: "http://127.0.0.1:3001".into(),
                 api_key: "key".into(),
                 timeout_secs: 5,
+                tag: String::new(),
             },
             llm: LlmConfig {
                 base_url: "http://127.0.0.1:3002/v1".into(),
@@ -800,6 +879,7 @@ mod tests {
                 retries: 0,
                 page_size: 10,
                 dry_run: false,
+                overwrite: false,
             },
             ui: UiConfig::default(),
         }
@@ -872,6 +952,7 @@ mod tests {
             Arc::new(Mutex::new(asset_rx)),
             Arc::new(AtomicU64::new(0)),
             Arc::new(AtomicU64::new(0)),
+            None,
         ));
         while asset_tx.capacity() == 0 {
             tokio::task::yield_now().await;

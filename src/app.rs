@@ -3,9 +3,9 @@
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
-use crate::config::Config;
+use crate::config::{Config, Overrides};
 use crate::events::{Action, Command, Event, Key, Stage};
-use crate::settings::{is_context_row, SettingsForm, DRY_RUN, THEME};
+use crate::settings::{is_context_row, SettingsForm, DRY_RUN, OVERWRITE, THEME};
 
 pub const LOG_CAP: usize = 500;
 pub const RATE_WINDOW: usize = 20;
@@ -25,12 +25,21 @@ pub enum RunState {
     Error(String),
 }
 
+/// Which try the current stage is on, once it repeats.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Attempt {
+    pub number: u32,
+    pub total: u32,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InFlight {
     pub id: String,
     pub name: String,
     pub stage: Stage,
     pub started_at: Instant,
+    /// `None` until the stage repeats.
+    pub retry: Option<Attempt>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -71,12 +80,12 @@ pub struct App {
     pub settings: SettingsForm,
     pub footer_message: Option<String>,
     pub should_quit: bool,
-    dry_run_override: bool,
+    overrides: Overrides,
     connection_test_id: u64,
 }
 
 impl App {
-    pub fn new(config: Config, first_run: bool, dry_run_override: bool) -> Self {
+    pub fn new(config: Config, first_run: bool, overrides: Overrides) -> Self {
         let settings = SettingsForm::from_config(&config);
         Self {
             config,
@@ -102,13 +111,18 @@ impl App {
             settings,
             footer_message: None,
             should_quit: false,
-            dry_run_override,
+            overrides,
             connection_test_id: 0,
         }
     }
 
     pub fn is_dry_run(&self) -> bool {
-        self.config.run.dry_run || self.dry_run_override
+        self.config.run.dry_run || self.overrides.dry_run
+    }
+
+    /// True when this run describes assets that already have a description.
+    pub fn is_overwrite(&self) -> bool {
+        self.config.run.overwrite || self.overrides.overwrite
     }
 
     pub fn on_event(&mut self, event: Event) {
@@ -124,11 +138,25 @@ impl App {
                 id,
                 name,
                 stage: Stage::Fetching,
+                retry: None,
                 started_at: Instant::now(),
             }),
+            Event::AssetRetry {
+                id,
+                attempt,
+                attempts,
+            } => {
+                if let Some(in_flight) = self.in_flight.iter_mut().find(|entry| entry.id == id) {
+                    in_flight.retry = Some(Attempt {
+                        number: attempt,
+                        total: attempts,
+                    });
+                }
+            }
             Event::AssetStage { id, stage } => {
                 if let Some(in_flight) = self.in_flight.iter_mut().find(|entry| entry.id == id) {
                     in_flight.stage = stage;
+                    in_flight.retry = None;
                 }
             }
             Event::AssetDone {
@@ -383,6 +411,14 @@ impl App {
                 self.settings.select_dry_run_next();
                 None
             }
+            Key::Left | Key::Char('h') if self.settings.focused == OVERWRITE => {
+                self.settings.select_overwrite_prev();
+                None
+            }
+            Key::Right | Key::Char('l') if self.settings.focused == OVERWRITE => {
+                self.settings.select_overwrite_next();
+                None
+            }
             Key::Left | Key::Char('h') if is_context_row(self.settings.focused) => {
                 self.settings.select_context_prev();
                 None
@@ -518,7 +554,7 @@ fn timestamp() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{Config, ThemeName};
+    use crate::config::{Config, Overrides, ThemeName};
     use crate::events::{Action, Command, Event, Key, Stage};
 
     fn config() -> Config {
@@ -530,7 +566,7 @@ mod tests {
     }
 
     fn app() -> App {
-        App::new(config(), false, false)
+        App::new(config(), false, Overrides::default())
     }
 
     fn done(name: &str) -> Event {
@@ -545,8 +581,40 @@ mod tests {
 
     #[test]
     fn first_run_opens_settings() {
-        assert_eq!(App::new(config(), true, false).screen, Screen::Settings);
+        assert_eq!(
+            App::new(config(), true, Overrides::default()).screen,
+            Screen::Settings
+        );
         assert_eq!(app().screen, Screen::Run);
+    }
+
+    #[test]
+    fn retry_events_track_the_attempt_and_a_new_stage_clears_it() {
+        let mut a = app();
+        a.on_event(Event::AssetStarted {
+            id: "1".into(),
+            name: "1".into(),
+        });
+        assert_eq!(a.in_flight[0].retry, None);
+
+        a.on_event(Event::AssetRetry {
+            id: "1".into(),
+            attempt: 3,
+            attempts: 4,
+        });
+        assert_eq!(
+            a.in_flight[0].retry,
+            Some(Attempt {
+                number: 3,
+                total: 4
+            })
+        );
+
+        a.on_event(Event::AssetStage {
+            id: "1".into(),
+            stage: Stage::Writing,
+        });
+        assert_eq!(a.in_flight[0].retry, None, "a new stage starts fresh");
     }
 
     #[test]
@@ -684,9 +752,31 @@ mod tests {
 
     #[test]
     fn cli_dry_run_override_is_visible_without_changing_saved_config() {
-        let a = App::new(config(), false, true);
+        let a = App::new(
+            config(),
+            false,
+            Overrides {
+                dry_run: true,
+                overwrite: false,
+            },
+        );
         assert!(a.is_dry_run());
         assert!(!a.config.run.dry_run);
+    }
+
+    #[test]
+    fn cli_overwrite_override_is_visible_without_changing_saved_config() {
+        let a = App::new(
+            config(),
+            false,
+            Overrides {
+                dry_run: false,
+                overwrite: true,
+            },
+        );
+        assert!(a.is_overwrite());
+        assert!(!a.config.run.overwrite);
+        assert!(!a.is_dry_run());
     }
 
     #[test]
@@ -732,6 +822,7 @@ mod tests {
         let mut a = app();
         assert_eq!(a.on_key(Key::Char('c')), None);
         assert_eq!(a.screen, Screen::Settings);
+        a.on_key(Key::Tab);
         a.on_key(Key::Tab);
         a.on_key(Key::Tab);
         a.on_key(Key::Tab);
@@ -883,7 +974,7 @@ mod tests {
     fn enter_on_last_field_saves() {
         let mut a = app();
         a.on_key(Key::Char('c'));
-        a.settings.focused = crate::settings::DRY_RUN;
+        a.settings.focused = crate::settings::OVERWRITE;
         assert!(matches!(a.on_key(Key::Enter), Some(Action::SaveConfig(_))));
     }
 
@@ -897,6 +988,18 @@ mod tests {
         assert_eq!(a.settings.theme, ThemeName::Mono);
         assert_eq!(a.on_key(Key::Char('h')), None);
         assert_eq!(a.settings.theme, ThemeName::Btop);
+    }
+
+    #[test]
+    fn overwrite_selector_uses_horizontal_keys() {
+        let mut a = app();
+        a.on_key(Key::Char('c'));
+        a.settings.focused = crate::settings::OVERWRITE;
+        assert!(!a.settings.overwrite);
+        assert_eq!(a.on_key(Key::Right), None);
+        assert!(a.settings.overwrite);
+        assert_eq!(a.on_key(Key::Char('h')), None);
+        assert!(!a.settings.overwrite);
     }
 
     #[test]

@@ -1,6 +1,6 @@
 //! The settings form screen.
 
-use ratatui::layout::{Constraint, Flex, Layout, Rect};
+use ratatui::layout::{Constraint, Flex, Layout};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Paragraph};
 use ratatui::Frame;
@@ -10,7 +10,8 @@ use super::truncate;
 use crate::app::App;
 use crate::config::ThemeName;
 use crate::settings::{
-    prompt_layout, CONTEXT_LABELS, CONTEXT_PEOPLE, DRY_RUN, IMMICH_KEY, LLM_KEY, PROMPT, THEME,
+    prompt_layout, CONTEXT_LABELS, CONTEXT_PEOPLE, DRY_RUN, IMMICH_KEY, IMMICH_TAG, LLM_KEY,
+    OVERWRITE, PROMPT, THEME,
 };
 use crate::theme::Theme;
 
@@ -21,12 +22,14 @@ pub fn render(frame: &mut Frame, app: &App, theme: &Theme) {
     let area = frame.area();
     let form = &app.settings;
     let width = area.width.saturating_sub(2).clamp(40, 78);
-    // Rows beyond the fields: the context switches, theme, dry run, a blank
-    // line, the test-connections line, the message line, the box borders,
-    // and the footer row.
-    let fixed_rows = CONTEXT_LABELS.len() as u16 + 9;
-    let height =
-        (form.fields.len() as u16 + fixed_rows + (PROMPT_HEIGHT as u16 - 1)).min(area.height);
+    // Scrolled rows: one per field, plus the extra rows the prompt spans, the
+    // context switches, theme, dry run, and overwrite.
+    let form_rows =
+        form.fields.len() as u16 + (PROMPT_HEIGHT as u16 - 1) + CONTEXT_LABELS.len() as u16 + 3;
+    // Rows outside the scrolled form: the two box borders, a blank line, the
+    // test-connections line, the message line, and the footer row.
+    let fixed_rows = 6;
+    let height = (form_rows + fixed_rows).min(area.height);
     let [v] = Layout::vertical([Constraint::Length(height)])
         .flex(Flex::Center)
         .areas(area);
@@ -117,6 +120,9 @@ pub fn render(frame: &mut Frame, app: &App, theme: &Theme) {
             };
             spans.push(Span::styled(hint, theme.dim));
         }
+        if i == IMMICH_TAG && field.value.trim().is_empty() {
+            spans.push(Span::styled("no tag", theme.dim));
+        }
         lines.push(Line::from(spans));
     }
     for (offset, label) in CONTEXT_LABELS.iter().enumerate() {
@@ -144,35 +150,38 @@ pub fn render(frame: &mut Frame, app: &App, theme: &Theme) {
         form.focused == DRY_RUN,
         theme,
     ));
-    lines.push(Line::default());
-    lines.push(test_line(app, theme));
-    lines.push(match &form.message {
-        Some(msg) => Line::from(Span::styled(format!("  {msg}"), theme.err)),
-        None => Line::default(),
-    });
-    // A message is the scroll anchor when there is one, so it is always in
-    // view even on a short terminal; otherwise the focused row anchors it.
-    let anchor_line = if form.message.is_some() {
-        lines.len() - 1
-    } else {
-        focused_line
-    };
-    let content_height = inner.height.saturating_sub(1);
-    let max_scroll = lines.len().saturating_sub(content_height as usize);
-    let visible_focus_offset = content_height.saturating_sub(1) as usize;
-    let mut scroll = anchor_line.saturating_sub(visible_focus_offset);
+    if form.focused == OVERWRITE {
+        focused_line = lines.len();
+    }
+    lines.push(switch_line(
+        "overwrite",
+        form.overwrite,
+        form.focused == OVERWRITE,
+        theme,
+    ));
+    // The test line, the message line, and the footer sit outside the scroll,
+    // so the row under edit always stays in view.
+    let [content, _spacer, test_row, message_row, footer] = Layout::vertical([
+        Constraint::Min(0),
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+    ])
+    .areas(inner);
+    let max_scroll = lines.len().saturating_sub(content.height as usize);
+    let visible_focus_offset = content.height.saturating_sub(1) as usize;
+    let mut scroll = focused_line.saturating_sub(visible_focus_offset);
     scroll = scroll.min(max_scroll);
-    let content = Rect {
-        height: content_height,
-        ..inner
-    };
     frame.render_widget(Paragraph::new(lines).scroll((scroll as u16, 0)), content);
+    frame.render_widget(Paragraph::new(test_line(app, theme)), test_row);
+    if let Some(msg) = &form.message {
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(format!("  {msg}"), theme.err))),
+            message_row,
+        );
+    }
 
-    let footer = Rect {
-        y: inner.y + inner.height.saturating_sub(1),
-        height: 1,
-        ..inner
-    };
     let key = |k: &str, label: &str| {
         vec![
             Span::styled(format!(" {k} "), theme.accent),

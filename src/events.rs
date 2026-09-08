@@ -10,6 +10,7 @@ pub enum Stage {
     Fetching,
     CallingLlm,
     Writing,
+    Tagging,
 }
 
 impl Stage {
@@ -19,6 +20,7 @@ impl Stage {
             Stage::Fetching => "fetching",
             Stage::CallingLlm => "calling llm",
             Stage::Writing => "writing",
+            Stage::Tagging => "tagging",
         }
     }
 }
@@ -41,6 +43,12 @@ pub enum Event {
     AssetStage {
         id: String,
         stage: Stage,
+    },
+    /// A stage is about to repeat. `attempt` counts from 2, `attempts` is the cap.
+    AssetRetry {
+        id: String,
+        attempt: u32,
+        attempts: u32,
     },
     AssetDone {
         id: String,
